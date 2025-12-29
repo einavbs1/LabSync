@@ -21,11 +21,12 @@ The tool allows lab managers to monitor connection status, synchronize changes, 
 
 ## ✨ Key Features
 * **Visual Dashboard:** Real-time status indication for connected computers.
+* **Security & Access Control:** **Admin Mode** prevents accidental deletions or changes. Configuration features are locked behind a password protection system.
+* **Multi-Workspace Tabs:** Manage multiple distinct lab environments (Buildings/Floors) using a convenient tabbed interface.
+* **Global Context Search:** Advanced search bar that locates computers and zones while displaying their exact hierarchy path.
 * **Git Automation:** One-click synchronization (Clone, Pull, Push) without using the CLI.
-* **Hierarchical Management:** Organize computers by **Workspaces** and **Zones**.
 * **Favorites Dashboard:** Pin frequently used zones for immediate access.
-* **Global Quick Search:** Instantly locate any computer and navigate directly to its specific location using the top search bar.
-* **Customizable Startup:** Configure your preferred default landing page to match your daily workflow.
+* **Dynamic Appearance:** Toggle between **Dark** and **Light** modes, with preferences automatically saved.
 * **Standalone Deployment:** Packaged as a portable `.exe` file using PyInstaller.
 * **Persistence:** Automatic state saving using Python's `pickle` module.
 
@@ -198,14 +199,11 @@ classDiagram
 
 ## 📷 Gallery / Screenshots
 
-![Search Function](Docs/search_Screenshot.png)
-![Favorites Screen](Docs/favs_Screenshot.png)
-
-| Zone Management | Settings & Favorites | Git Operations |
+| Main Dashboard | Smart Search | Favorites & Security |
 |:---:|:---:|:---:|
-| ![Zone View](images/zone_view.png) | ![Settings](images/settingsss.png) | ![Git Sync](images/git_sync.png) |
-| *View and manage lab zones* | *Favorites & Startup Config* | *Live synchronization status* |
+| ![Main Dashboard](Docs/main_Screenshot.png) | ![Search Interface](Docs/search_Screenshot.png) | ![Favorites Panel](Docs/favs_Screenshot.png) |
+| *Manage Workspaces & Zones* | *Locate items with hierarchy context* | *Pinned items & Admin Unlock* |
 
 
 ---
-**Author:** [Your Name]
+**Author:** [Einav Momi Ben Shushan]

@@ -1,0 +1,13 @@
+
+cd LabSync-Prog
+#---------------------------------------------------------------------------------------------#
+# Creating real exe:
+
+pyinstaller --name "Lab-Sync-Real-MyProg" --onefile --windowed --icon "images\LabSyncIcon.ico" --add-data "images;images" gui.py
+
+
+
+#---------------------------------------------------------------------------------------------#
+# Creating debug exe:
+
+pyinstaller --name "Lab-Sync-WithTerminal-ToDebug-MyProg" --onefile --icon "images\LabSyncIcon.ico" --add-data "images;images" gui.py

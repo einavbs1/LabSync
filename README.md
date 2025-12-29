@@ -1,21 +1,30 @@
 # Lab Sync 🔄
 
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platform](https://img.shields.io/badge/platform-windows-lightgrey)
+![Status](https://img.shields.io/badge/status-active-success)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 **A Desktop Dashboard for Git Automation and Lab Management**
 
-![App Screenshot](Docs/main_Screenshot.png)
-*(Place a screenshot of your app here)*
+![Main Dashboard](Docs/main_Screenshot.png)
+![Search Function](Docs/search_Screenshot.png)
+![Favorites Screen](Docs/favs_Screenshot.png)
+
+
+---
 
 ## 📋 Overview
 **Lab Sync** is a robust Python-based desktop application designed to streamline the management of multiple Git repositories across various workstations. It replaces complex command-line operations with a modern, user-friendly GUI.
 
-The tool allows lab managers to monitor connection status, synchronize changes, and manage file systems across a hierarchical network of computers (Zones/Workspaces).
+The tool allows lab managers to monitor connection status, synchronize changes, and manage file systems across a hierarchical network of computers. It is specifically designed for testing environments like **QA Automation**, **Integration Labs**, and **Staging Environments**.
 
 ---
 
 ## ✨ Key Features
 * **Visual Dashboard:** Real-time status indication for connected computers.
 * **Git Automation:** One-click synchronization (Clone, Pull, Push) without using the CLI.
-* **Hierarchical Management:** Organize computers by Workspaces and Zones.
+* **Hierarchical Management:** Organize computers by **Workspaces** and **Zones**.
 * **Navigation Stack:** Browser-like "Back" and "Forward" navigation between screens.
 * **Standalone Deployment:** Packaged as a portable `.exe` file using PyInstaller.
 * **Persistence:** Automatic state saving using Python's `pickle` module.

@@ -7,8 +7,9 @@
 
 **A Desktop Dashboard for Git Automation and Lab Management**
 
-![Main Dashboard](Docs/main_Screenshot.png)
-
+| ![Main Dashboard Dark Mode](Docs/main_Screenshot.png) | ![Main Dashboard Light Mode](Docs/mainLightMode_Screenshot.png) |
+|:---:|:---:|
+| *Dark Mode View* | *Light Mode View* |
 
 ---
 

@@ -417,9 +417,11 @@ class LabSyncDashBoard(ctk.CTk):
             self.results_frame.grid()
             self.results_frame.configure(height=min(len(matches) * 35, 200))
             for i, match in enumerate(matches):
-                miniIconObj = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_zone.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_zone.png")), size=(20,20))
+                # miniIconObj = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_zone.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_zone.png")), size=(20,20))
+                miniIconObj = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_zone.png")), size=(20,20))
                 if "Pc: " in match:
-                    miniIconObj = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_pc.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(20,20))
+                    # miniIconObj = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_pc.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(20,20))
+                    miniIconObj = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(20,20))
                 btn = ctk.CTkButton(self.results_frame, 
                                             text=match, 
                                             fg_color="transparent",
@@ -520,7 +522,8 @@ class LabSyncDashBoard(ctk.CTk):
         self.deleteThisWSFrame.columnconfigure(4, weight=1)
         self.deleteThisWSFrame.grid(row=0, column=0,padx=10 ,pady=10 , sticky="nsew")
 
-        self.delWSIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_DeleteWS.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_DeleteWS.png")), size=(40,40))
+        # self.delWSIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_DeleteWS.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_DeleteWS.png")), size=(40,40))
+        self.delWSIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_DeleteWS.png")), size=(40,40))
         
         self.delWSButtonLabel = ctk.CTkButton(self.deleteThisWSFrame, corner_radius=3,  border_spacing=10, compound="left", text=f"Delete '{ws_obj.WorkSpace_name}' ws", fg_color="transparent", image=self.delWSIcon , anchor="center", border_color="black", font=("Helvetica", 18, "bold"), text_color=("white","white"),state="disable")
         self.delWSButtonLabel.grid(row=0, column=1, columnspan=2)
@@ -584,7 +587,8 @@ class LabSyncDashBoard(ctk.CTk):
         frameToChange.columnconfigure(3,weight=1)
         frameToChange.columnconfigure(4,weight=1)
 
-        self.plusIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        # self.plusIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        self.plusIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
         
         self.plusButtonLabel = ctk.CTkButton(frameToChange, corner_radius=3,  border_spacing=10, compound="left", text=f"Adding new workspace", fg_color="transparent", image=self.plusIcon , anchor="center", border_color="black", font=("Helvetica", 18, "bold"), text_color=("white","white"),state="disable")
         self.plusButtonLabel.grid(row=0, column=0, columnspan=3)
@@ -629,7 +633,8 @@ class LabSyncDashBoard(ctk.CTk):
         self.addNewZoneFrame.columnconfigure(4, weight=1)
         self.addNewZoneFrame.grid(row=0, column=0,padx=10 ,pady=10 , sticky="nsew")
 
-        self.plusIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        # self.plusIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        self.plusIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
         
         self.plusButtonLabel = ctk.CTkButton(self.addNewZoneFrame, corner_radius=3,  border_spacing=10, compound="left", text=f"Adding new Zone to '{ws_obj.WorkSpace_name}' ws", fg_color="transparent", image=self.plusIcon , anchor="center", border_color="black", font=("Helvetica", 18, "bold"), text_color=("white","white"),state="disable")
         self.plusButtonLabel.grid(row=0, column=1, columnspan=2)
@@ -688,7 +693,8 @@ class LabSyncDashBoard(ctk.CTk):
         # self.newCard.rowconfigure(1,weight=1)
         self.newCard.columnconfigure(0,weight=1)
         
-        self.newIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_{cardtype}.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
+        # self.newIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_{cardtype}.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
+        self.newIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
         
         self.newButton = ctk.CTkButton(self.newCard, corner_radius=3,  border_spacing=10, compound="top", text=name, fg_color="transparent", command=funcToBtn , image=self.newIcon , anchor="center", border_color="black", hover_color=("gray85","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
         self.newButton.grid(row=0, column=0, padx=10, pady=10)
@@ -795,7 +801,8 @@ class LabSyncDashBoard(ctk.CTk):
         self.errMsgPush.grid(row=0, column=1, columnspan=3, sticky="news")
 
 
-        self.push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
+        # self.push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
+        self.push_n_commit_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
         
         self.Push_n_Commit_Btn = ctk.CTkButton(self.git_Frame, corner_radius=5,  border_spacing=10, compound="top", text="Push & Commit", fg_color="gray75", command= lambda x =self.errMsgPush, y = self.git_comment_Textbox: self.push_n_commit_Btn_Func(x,y) , image=self.push_n_commit_icon , anchor="center", border_color="black", hover_color=("gray55","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
         self.Push_n_Commit_Btn.grid(row=3, column=2, columnspan=2, padx=10, pady=10, sticky="n")
@@ -942,7 +949,8 @@ class LabSyncDashBoard(ctk.CTk):
         self.newCard.columnconfigure(0,weight=1)
         self.newCard.columnconfigure(1,weight=0)
         
-        self.newIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_{cardtype}.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
+        # self.newIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_{cardtype}.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
+        self.newIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
         if(host_name != "" and cardtype == "pc"):
             res = self.checkPingStatus(host_name)
             if (res):
@@ -1517,7 +1525,8 @@ class LabSyncDashBoard(ctk.CTk):
         CancelBtn = ctk.CTkButton(btnRowFrame, corner_radius=3, height=40, border_spacing=10, compound="top", text="  Cancel", fg_color="transparent", text_color=("gray10", "gray90"), command=repoWarningPopupToplevel.destroy , image=CancelIcon, hover_color=("gray70","gray30"), anchor="center", font=ctk.CTkFont(size=15, weight="bold"), )
         CancelBtn.grid(row=0, column=0, padx=10, pady=10, sticky="news")
 
-        push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
+        # push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
+        push_n_commit_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
         Push_n_Commit_Btn = ctk.CTkButton(btnRowFrame, corner_radius=5,  border_spacing=10, compound="top", text="Push & Commit", fg_color="gray75", command=lambda x=repoWarningPopupToplevel, y= errMsgLabel : self.confirmTheCommit(x,y)  , image=self.push_n_commit_icon , anchor="center", border_color="black", hover_color=("gray85","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
         Push_n_Commit_Btn.grid(row=0, column=1, padx=10, pady=10, sticky="news")
 
@@ -1578,7 +1587,8 @@ class LabSyncDashBoard(ctk.CTk):
         popup.grid_columnconfigure(4,weight=1)
         popup.grid_columnconfigure(5,weight=1)
 
-        pcIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_pc.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(60,60))
+        # pcIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_pc.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(60,60))
+        pcIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(60,60))
         pcIconLabel = ctk.CTkLabel(popup, text="", compound="center", image=pcIcon)
         pcIconLabel.grid(row=0, column=2, columnspan=2, padx=10, pady=10, sticky="news")
 
@@ -1696,7 +1706,8 @@ class LabSyncDashBoard(ctk.CTk):
         
         self.intoTablePathFiles_frames.grid(row=1, column=0, columnspan=3, padx=10, pady=10, sticky="news")
 
-        self.addMorePathIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        # self.addMorePathIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
+        self.addMorePathIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
         self.addMorePathBtn = ctk.CTkButton(pathfilesMainTableFrame, corner_radius=3, height=40, border_spacing=10, text="  Add More Path",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=self.pathsElements : self.addingPathRowToTable(x) , image=self.addMorePathIcon ,hover_color=("gray70","gray30"), font=ctk.CTkFont(size=15, weight="bold"))
         self.addMorePathBtn.configure(state="disabled")
         self.addMorePathBtn.grid(row=2, column=1, padx=10, pady=10, sticky="news")

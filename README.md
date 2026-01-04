@@ -203,7 +203,8 @@ classDiagram
 | Main Dashboard | Smart Search | Favorites & Security |
 |:---:|:---:|:---:|
 | ![Main Dashboard](Docs/main_Screenshot.png) | ![Search Interface](Docs/search_Screenshot.png) | ![Favorites Panel](Docs/favs_Screenshot.png) |
-| *Manage Workspaces & Zones* | *Locate items with hierarchy context* | *Pinned items & Admin Unlock* |
+| *Manage Workspaces* | *Manage Zones* | *Startup Selection Unlock* |
+| ![Manage_Workspaces](Docs/manage_WS.png) | ![Manage_zones](Docs/manage_Zone.png) | ![Startup_Selection_Unlock](Docs/favs_Unlocked.png) |
 
 
 ---

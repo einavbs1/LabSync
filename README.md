@@ -1,4 +1,4 @@
-# Lab Sync 🔄
+# Lab Sync
 
 ![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-windows-lightgrey)

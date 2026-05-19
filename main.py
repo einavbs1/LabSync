@@ -313,12 +313,58 @@ class LabSyncDashBoard(ctk.CTk):
 
     
 
+    def show_changelog_popup(self):
+        try:
+            with open(os.path.join(base_path, "changelog.txt"), encoding="utf-8") as f:
+                changelog = f.read()
+        except Exception as e:
+            changelog = f"Could not load changelog file.\n{e}"
+
+        # Modern popup window
+        popup = ctk.CTkToplevel(self)
+        popup.title("What's New?")
+        popup.geometry("600x520")
+        popup.resizable(True, True)
+        popup.grab_set()
+        popup.focus_set()
+        popup.configure(fg_color=("#f5f5f5", "#23272e"))
+
+        frame = ctk.CTkFrame(popup, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+
+        title_label = ctk.CTkLabel(frame, text="What's New in LabSync", font=ctk.CTkFont(size=24, weight="bold"), text_color=("#1d4ed8", "#93c5fd"))
+        title_label.pack(pady=(0, 18))
+
+        # Parse changelog for bold section titles (lines starting with a number and dot)
+        content_frame = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        content_frame.pack(fill="both", expand=True)
+
+        for line in changelog.splitlines():
+            m = re.match(r"^(\d+\. )(.*)", line)
+            if m:
+                # Section title
+                section_title = m.group(2)
+                ctk.CTkLabel(content_frame, text=section_title, font=ctk.CTkFont(size=18, weight="bold"), text_color=("#111827", "#e0e7ef"), anchor="w", justify="left").pack(anchor="w", pady=(12, 0))
+            elif line.strip().startswith("-"):
+                # Sub-bullet
+                ctk.CTkLabel(content_frame, text=line.strip(), font=ctk.CTkFont(size=14), text_color=("#374151", "#cbd5e1"), anchor="w", justify="left", wraplength=540).pack(anchor="w", padx=16)
+            elif line.strip():
+                # Any other text
+                ctk.CTkLabel(content_frame, text=line.strip(), font=ctk.CTkFont(size=14), text_color=("#374151", "#cbd5e1"), anchor="w", justify="left", wraplength=540).pack(anchor="w", pady=(2, 0))
+
+        close_btn = ctk.CTkButton(frame, text="Close", command=popup.destroy, width=120, height=36, font=ctk.CTkFont(size=15, weight="bold"))
+        close_btn.pack(pady=(18, 0))
+
     def SideBar(self):
         #Side Bar
         self.sidebar_nav = ctk.CTkFrame(self, width=250 ,corner_radius=15)
         self.sidebar_nav.grid(row=0, column=0, sticky="nsew")
         self.sidebar_nav.grid_rowconfigure(5,weight=1)
         self.sidebar_nav.grid_rowconfigure(6,weight=1)
+        # Info (i) button
+        self.InfoIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "info.png")), size=(32,32)) if os.path.exists(os.path.join(images_folder_path, "info.png")) else None
+        self.InfoButton = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=36, border_spacing=10, text="  What's New?", fg_color="transparent", text_color=("gray10", "gray90"), command=self.show_changelog_popup, image=self.InfoIcon, hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=16, weight="bold"))
+        self.InfoButton.grid(row=7, column=0, padx=2, pady=8, sticky="ew")
 
         #Logo
         try:
@@ -1031,7 +1077,6 @@ class LabSyncDashBoard(ctk.CTk):
             font=UI_FONT_BODY,
             checkbox_width=20,
             checkbox_height=20,
-            command=self._on_not_using_param_toggle,
         )
         self.not_using_param_checkbox.grid(row=1, column=3, columnspan=2, padx=12, pady=(4, 6), sticky="w")
 
@@ -1416,23 +1461,6 @@ class LabSyncDashBoard(ctk.CTk):
 
         self._enqueue_ui(run)
 
-    def _on_not_using_param_toggle(self):
-        """Ask for password when the 'Not using this parameter' checkbox is toggled on."""
-        if self.not_using_param_checkbox.get():  # just got checked
-            dialog = CTkInputDialog(
-                text="Enter password to enable this option:",
-                title="Password Required",
-            )
-            password = dialog.get_input()
-            if password != "admin":
-                self.not_using_param_checkbox.deselect()
-                return
-            # Correct password — disable and gray the block dropdown
-            self.block_dropdown.configure(state="disabled")
-        else:
-            # Unchecked — re-enable the block dropdown
-            self.block_dropdown.configure(state="readonly")
-
     def _sync_pipeline_success(self, errMsgLabel, commit_box, currstatpopup):
         def run():
             self.git_progressbar.stop()
@@ -1441,9 +1469,26 @@ class LabSyncDashBoard(ctk.CTk):
             currstatpopup.update_status("Successful", 1.0, "Done")
             errMsgLabel.configure(text="Successfull", text_color="green")
             commit_box.delete("0.0", "end")
-            # Reset checkbox and re-enable dropdown after successful push
-            self.not_using_param_checkbox.deselect()
-            self.block_dropdown.configure(state="readonly")
+            # Reset dropdown/checkbox after successful push, even if controls are still disabled.
+            try:
+                prev_block_state = str(self.block_dropdown.cget("state"))
+                if prev_block_state == "disabled":
+                    self.block_dropdown.configure(state="readonly")
+                self.block_dropdown.set("")
+                if prev_block_state == "disabled":
+                    self.block_dropdown.configure(state="disabled")
+            except Exception:
+                pass
+
+            try:
+                prev_checkbox_state = str(self.not_using_param_checkbox.cget("state"))
+                if prev_checkbox_state == "disabled":
+                    self.not_using_param_checkbox.configure(state="normal")
+                self.not_using_param_checkbox.deselect()
+                if prev_checkbox_state == "disabled":
+                    self.not_using_param_checkbox.configure(state="disabled")
+            except Exception:
+                pass
             currstatpopup.close_with_delay()
 
         self._enqueue_ui(run)
@@ -1498,15 +1543,14 @@ class LabSyncDashBoard(ctk.CTk):
         selected_block = self.block_dropdown.get()
         is_not_using_param = self.not_using_param_checkbox.get()
 
-        # Validate that a block is selected when not using parameter is unchecked
-        if not is_not_using_param and not selected_block.strip():
-            messagebox.showwarning("Invalid input", "You must select a block or check 'Not using this parameter'.")
-            errMsgLabel.configure(text="You must select a block.", text_color="red")
+        if not is_not_using_param and not str(selected_block).strip():
+            messagebox.showwarning("Invalid input", "Please select a block before push.")
+            errMsgLabel.configure(text="Please select a block before push.", text_color="red")
             return
 
         # If checkbox is not checked, prepend the block to the comment
         if not is_not_using_param:
-            commit_msg = f"{selected_block.strip()}: {commit_msg}"
+            commit_msg = f"{selected_block}: {commit_msg}"
 
         currstatpopup = StatusPopup(self, "Updates: ", "Starting…")
         currstatpopup.update_status("Starting synchronization…", 0.0, "Step 1/6: Fetch & Pull")

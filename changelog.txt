@@ -1,0 +1,24 @@
+
+
+LabSync – Changelog
+Release Date: 2026-05-19
+
+1. New and improved UI design
+	- The user interface has been redesigned for a more modern, clean, and user-friendly experience.
+	- Buttons, forms, and dialogs are now more accessible and visually appealing.
+
+2. Display of folder changes
+	- You can now easily see which files and folders have changed since the last update.
+	- New, deleted, and modified files are clearly marked for better tracking.
+
+3. Visual Diff between old and new content
+	- Instantly compare the old and new versions of any file with a visual diff view.
+	- Added, removed, and changed lines are highlighted for clarity.
+
+4. Commit confirmation dialog
+	- Before committing changes, a summary of all modifications is shown for review.
+	- Users must confirm the commit to prevent accidental changes.
+
+5. Mandatory selection of block for update
+	- When updating, you must now select which block (workspace/project) to apply the update to.
+	- This ensures updates are applied to the correct area and prevents mistakes.

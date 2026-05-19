@@ -13,7 +13,7 @@ if sys.stderr is None:
     sys.stderr = NullWriter()
 
 
-
+import hashlib
 import customtkinter as ctk
 import pickle
 import time
@@ -22,6 +22,7 @@ from customtkinter import CTkInputDialog
 from models import Computer, Room, Zone, WorkSpace, Settings
 from PIL import Image
 import tkinter.messagebox as messagebox
+import tkinter.filedialog as filedialog
 from git import Repo
 import git
 from pathlib import Path
@@ -31,11 +32,21 @@ import stat
 import shutil
 import paramiko
 import subprocess
+import threading
+import queue
 
 
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+# Tuple fonts only — never use ctk.CTkFont() at import time (needs a root window first).
+UI_FONT_FAMILY = "Segoe UI"
+UI_FONT_BODY = (UI_FONT_FAMILY, 13)
+UI_FONT_BODY_BOLD = (UI_FONT_FAMILY, 13, "bold")
+UI_FONT_TITLE = (UI_FONT_FAMILY, 18, "bold")
+UI_FONT_SMALL = (UI_FONT_FAMILY, 11)
+
 DATA_FILE = "WorkSpace_data.pkl"
 appWidth = 1200
 appHeight = 600
@@ -54,31 +65,181 @@ appSettings = None
 unlockPassword = "admin"
 
 class StatusPopup(ctk.CTkToplevel):
+    """Modern progress dialog for long-running sync operations."""
+
     def __init__(self, master, title, initial_message):
         super().__init__(master)
         self.title(title)
-        self.geometry("800x200")
+        self.geometry("820x440")
         self.attributes("-topmost", True)
-        self.resizable(False, False)
-        
-        self.label = ctk.CTkLabel(self, text=initial_message, font=("Arial", 14))
-        self.label.pack(pady=(30, 10))
-        self.labelprogress = ctk.CTkLabel(self, text="0%", font=("Arial", 14))
-        self.labelprogress.pack(pady=(30, 10))
+        self.resizable(True, True)
+        self.minsize(720, 650)
 
-        self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal", width=300)
-        self.progress_bar.pack(pady=10)
+        self.configure(fg_color=("gray92", "gray14"))
+
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=18, pady=18)
+
+        self._card = ctk.CTkFrame(
+            outer,
+            corner_radius=22,
+            fg_color=("gray98", "gray17"),
+            border_width=1,
+            border_color=("gray85", "gray32"),
+        )
+        self._card.pack(fill="both", expand=True)
+
+        hero = ctk.CTkFrame(
+            self._card,
+            corner_radius=16,
+            fg_color=("#1d4ed8", "#1d4ed8"),
+            height=72,
+        )
+        hero.pack(fill="x", padx=14, pady=(14, 0))
+        hero.pack_propagate(False)
+
+        hero_pad = ctk.CTkFrame(hero, fg_color="transparent")
+        hero_pad.pack(fill="both", expand=True, padx=22, pady=14)
+        ctk.CTkLabel(
+            hero_pad,
+            text="Synchronization",
+            text_color=("white", "white"),
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hero_pad,
+            text="Git fetch, files, commit & push",
+            text_color=("#bfdbfe", "#bfdbfe"),
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+
+        body = ctk.CTkFrame(self._card, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=(18, 18))
+
+        self.stage_label = ctk.CTkLabel(
+            body,
+            text="Step — / —",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=("#2563eb", "#60a5fa"),
+            anchor="w",
+        )
+        self.stage_label.pack(fill="x", pady=(0, 6))
+
+        self.label = ctk.CTkLabel(
+            body,
+            text=initial_message,
+            font=ctk.CTkFont(family="Segoe UI", size=14),
+            text_color=("gray20", "gray90"),
+            wraplength=720,
+            justify="left",
+            anchor="w",
+        )
+        self.label.pack(fill="x", pady=(0, 14))
+
+        prog_row = ctk.CTkFrame(body, fg_color="transparent")
+        prog_row.pack(fill="x", pady=(0, 12))
+        prog_row.grid_columnconfigure(0, weight=1)
+
+        bar_wrap = ctk.CTkFrame(prog_row, fg_color="transparent")
+        bar_wrap.grid(row=0, column=0, sticky="ew", padx=(0, 16))
+
+        self.progress_bar = ctk.CTkProgressBar(
+            bar_wrap,
+            orientation="horizontal",
+            height=16,
+            corner_radius=8,
+            progress_color=("#2563eb", "#3b82f6"),
+            fg_color=("gray82", "gray35"),
+            border_width=0,
+        )
+        self.progress_bar.pack(fill="x")
         self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(0)
+
+        pct_col = ctk.CTkFrame(prog_row, fg_color="transparent", width=88)
+        pct_col.grid(row=0, column=1, sticky="e")
+        pct_col.grid_propagate(False)
+
+        self.labelprogress = ctk.CTkLabel(
+            pct_col,
+            text="0%",
+            font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
+            text_color=("gray25", "gray95"),
+        )
+        self.labelprogress.pack(anchor="e")
+
+        self._pct_sub = ctk.CTkLabel(
+            pct_col,
+            text="complete",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("gray50", "gray60"),
+        )
+        self._pct_sub.pack(anchor="e")
+
+        log_outer = ctk.CTkFrame(
+            body,
+            corner_radius=14,
+            fg_color=("gray90", "gray22"),
+            border_width=1,
+            border_color=("gray80", "gray30"),
+        )
+        log_outer.pack(fill="both", expand=True)
+
+        log_head = ctk.CTkFrame(log_outer, fg_color="transparent", height=28)
+        log_head.pack(fill="x", padx=14, pady=(12, 6))
+
+        ctk.CTkLabel(
+            log_head,
+            text="Activity log",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=("gray35", "gray80"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            log_head,
+            text="Live updates",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=("gray55", "gray60"),
+        ).pack(side="left", padx=(10, 0))
+
+        self.log_box = ctk.CTkTextbox(
+            log_outer,
+            height=300,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=("gray95", "gray12"),
+            text_color=("gray15", "gray88"),
+            border_width=0,
+            corner_radius=10,
+        )
+        self.log_box.pack(fill="both", expand=True, padx=10, pady=(0, 12))
+        self.log_box.configure(state="disabled")
+        self._last_stage_text = None
 
         self.update()
         self.wait_visibility()
 
-    def update_status(self, message, progress_value):
+    def append_log(self, line):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", line + "\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def update_status(self, message, progress_value, stage_text=None):
         print(f"DEBUG: {message} ({int(progress_value * 100)}%)")
+        if stage_text:
+            self.stage_label.configure(text=stage_text)
+            if stage_text != self._last_stage_text:
+                self.append_log("")
+                self.append_log("=============")
+                self.append_log(stage_text)
+                self.append_log("=============")
+                self._last_stage_text = stage_text
         self.label.configure(text=message)
-        self.labelprogress.configure(text=f"{int(progress_value * 100)}%")
+        pct = int(progress_value * 100)
+        self.labelprogress.configure(text=f"{pct}%")
         self.progress_bar.set(progress_value)
+        self.append_log(message)
         self.update()
         self.update_idletasks()
 
@@ -115,6 +276,9 @@ class LabSyncDashBoard(ctk.CTk):
         self.tempSelectionComboBox = ""
         ctk.set_appearance_mode(appSettings.theme)
         self.dummy_entry = ctk.CTkEntry(self, width=1, height=1, placeholder_text=" ")
+
+        self._sync_job_queue = queue.Queue()
+        self._sync_worker_running = False
 
         
 
@@ -158,7 +322,8 @@ class LabSyncDashBoard(ctk.CTk):
 
         #Logo
         try:
-            self.LogoIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "Logo_light_mode.png")), dark_image=Image.open(os.path.join(images_folder_path, "Logo_dark_mode.png")), size=(300,200))
+            # self.LogoIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "Logo_light_mode.png")), dark_image=Image.open(os.path.join(images_folder_path, "Logo_dark_mode.png")), size=(300,200))
+            self.LogoIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "LabSyncIcon-WithoutBG.png")), size=(300,200))
             self.LogoLabel = ctk.CTkLabel(self.sidebar_nav, text="", compound="left", image=self.LogoIcon)
             self.LogoLabel.grid(row=0, column=0 ,padx=10, pady=10, sticky="ew")
         except Exception as e:
@@ -167,11 +332,11 @@ class LabSyncDashBoard(ctk.CTk):
         
 
         self.HomeIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "home-button.png")), size=(40,40))
-        self.HomeButton = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Home",fg_color="transparent", text_color=("gray10", "gray90"), command=self.showHomePage , image=self.HomeIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
+        self.HomeButton = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Home",fg_color="transparent", text_color=("gray10", "gray90"), command=self.showHomePage , image=self.HomeIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
         self.HomeButton.grid(row=1, column=0, padx=2, pady=2, sticky="ew")
 
         self.AppearanceThemeIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "Appearance_dark_mode.png")), dark_image=Image.open(os.path.join(images_folder_path, "Appearance_light_mode.png")), size=(40,40))
-        self.AppearanceButton = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Change Appearance",fg_color="transparent", text_color=("gray10", "gray90"), command=self.changeAppearance , image=self.AppearanceThemeIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
+        self.AppearanceButton = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Change Appearance",fg_color="transparent", text_color=("gray10", "gray90"), command=self.changeAppearance , image=self.AppearanceThemeIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
         self.AppearanceButton.grid(row=2, column=0, padx=2, pady=2, sticky="ew")
 
         self.NavFrameRow = ctk.CTkFrame(self.sidebar_nav)
@@ -181,12 +346,12 @@ class LabSyncDashBoard(ctk.CTk):
 
         self.Real_BackIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "Real_BackArrow.png")), size=(30,30))
         self.Gray_BackIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "Gray_BackArrow.png")), size=(30,30))
-        self.BackButton = ctk.CTkButton(self.NavFrameRow, corner_radius=4, height=40, border_spacing=10, text="  Back",fg_color="transparent", text_color=("gray10", "gray90"), command=self.PressedOnBackBtn , image=self.Gray_BackIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"), state="disabled")
+        self.BackButton = ctk.CTkButton(self.NavFrameRow, corner_radius=4, height=40, border_spacing=10, text="  Back",fg_color="transparent", text_color=("gray10", "gray90"), command=self.PressedOnBackBtn , image=self.Gray_BackIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"), state="disabled")
         self.BackButton.grid(row=0, column=0, padx=0, pady=0, sticky="news")
 
         self.Real_ForwardIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "Real_ForwardArrow.png")), size=(30,30))
         self.Gray_ForwardIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "Gray_ForwardArrow.png")), size=(30,30))
-        self.ForwardButton = ctk.CTkButton(self.NavFrameRow, corner_radius=4, height=40, border_spacing=10, text="  Forward",fg_color="transparent", text_color=("gray10", "gray90"), command=self.pressedOnForwardBtn , image=self.Gray_ForwardIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"), state="disabled")
+        self.ForwardButton = ctk.CTkButton(self.NavFrameRow, corner_radius=4, height=40, border_spacing=10, text="  Forward",fg_color="transparent", text_color=("gray10", "gray90"), command=self.pressedOnForwardBtn , image=self.Gray_ForwardIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"), state="disabled")
         self.ForwardButton.grid(row=0, column=1, padx=0, pady=0, sticky="news")
 
         # self.NavFrameRow.grid(row=4, column=0, padx=2, pady=2, sticky="ews")
@@ -203,16 +368,16 @@ class LabSyncDashBoard(ctk.CTk):
         # self.homepagecombobox.grid(row=0, column=1 ,sticky="we")
 
         self.updateHomePageSelectionIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "updateIcon.png")), size=(20,20))
-        self.updateHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Update Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.updateStartHomePage , image=self.updateHomePageSelectionIcon ,hover_color=("gray70","gray30"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
+        self.updateHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Update Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.updateStartHomePage , image=self.updateHomePageSelectionIcon ,hover_color=("gray55","gray55"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
         self.updateHomePageSelectionBTN.grid(row=1, column=0, columnspan=2)
         self.updateHomePageSelectionBTN.configure(state="disable")
 
         # self.lockHomePageSelectionIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "lockIcon.png")), size=(20,20))
-        # self.lockHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Lock Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.updateStartHomePage , image=self.updateHomePageSelectionIcon ,hover_color=("gray70","gray30"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
+        # self.lockHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Lock Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.updateStartHomePage , image=self.updateHomePageSelectionIcon ,hover_color=("gray55","gray55"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
         # self.lockHomePageSelectionBTN.grid(row=1, column=1)
 
         self.unlockHomePageSelectionIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "unlockIcon.png")), size=(20,20))
-        self.unlockHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Unlock Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.unlockTheSelection , image=self.unlockHomePageSelectionIcon ,hover_color=("gray70","gray30"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
+        self.unlockHomePageSelectionBTN = ctk.CTkButton(self.homepageselectionFrameRow, corner_radius=4, height=40, border_spacing=10, text=" Unlock Selection",fg_color="transparent", text_color=("gray10", "gray90"), command=self.unlockTheSelection , image=self.unlockHomePageSelectionIcon ,hover_color=("gray55","gray55"), anchor="center", font=ctk.CTkFont(size=12, weight="bold"))
         self.unlockHomePageSelectionBTN.grid(row=1, column=0, columnspan=2)
         # self.homepagelabel.grid(row=0, column=0 , sticky="news")
         # self.passwordToUpdateHomePage.grid(row=0, column=1)
@@ -227,7 +392,7 @@ class LabSyncDashBoard(ctk.CTk):
         self.homepageselectionFrameRow.grid(row=5, column=0, padx=2, pady=2, sticky="news")
         print(f"startHomePage == {appSettings.startHomePage}")
         self.favoritesIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "favoritesIcon.png")), size=(40,40))
-        self.favoritesButtonSideBar = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Favorites",fg_color="transparent", text_color=("gray10", "gray90"), command=self.loadFavsPage , image=self.favoritesIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
+        self.favoritesButtonSideBar = ctk.CTkButton(self.sidebar_nav, corner_radius=4, height=40, border_spacing=10, text="  Favorites",fg_color="transparent", text_color=("gray10", "gray90"), command=self.loadFavsPage , image=self.favoritesIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=20, weight="bold"))
         self.favoritesButtonSideBar.grid(row=6, column=0, padx=2, pady=2, sticky="ews")
 
 
@@ -355,6 +520,7 @@ class LabSyncDashBoard(ctk.CTk):
         self.mainFrame.grid_rowconfigure(1,weight=1)
         self.mainFrame.grid_rowconfigure(2,weight=0)
         self.mainFrame.grid_columnconfigure(0,weight=1)
+        self.mainFrame.configure(fg_color=("#FFFFFF", "#121212"))
         self.searchRow()
         self.tabsWidgetsFunc()
         startuptype = self.choiceFromComboBoxToRealname(appSettings.startHomePage)
@@ -383,7 +549,7 @@ class LabSyncDashBoard(ctk.CTk):
         self.results_frame.grid_remove()
 
         self.searchIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "search.png")), size=(20,20))
-        self.searchBtn = ctk.CTkButton(self.searchFrame, corner_radius=5, height=40, border_spacing=10, text=" Search",fg_color="transparent", text_color="#34495E", command=self.button_func, image=self.searchIcon ,hover_color=("gray100","gray100"), anchor="nsew", font=ctk.CTkFont(size=20, weight="bold"))
+        self.searchBtn = ctk.CTkButton(self.searchFrame, corner_radius=5, height=40, border_spacing=10, text=" Search",fg_color="transparent", text_color="#34495E", command=self.button_func, image=self.searchIcon ,hover_color=("gray55","gray55"), anchor="nsew", font=ctk.CTkFont(size=20, weight="bold"))
         # self.searchBtn.grid(row=0,column=1,sticky="nsew")
 
         self.searchDictCreate()
@@ -427,7 +593,7 @@ class LabSyncDashBoard(ctk.CTk):
                                             fg_color="transparent",
                                             image = miniIconObj,
                                             text_color=("black", "white"),
-                                            hover_color=("gray80", "gray30"),
+                                            hover_color=("gray55","gray55"),
                                             anchor="w",
                                             command=lambda m=match: self.handle_selection(m))
                 btn.grid(row=i, column=0, sticky="ew", padx=5, pady=2)
@@ -543,7 +709,7 @@ class LabSyncDashBoard(ctk.CTk):
         self.deleteThisWSERRLabel.grid(row=4, column=1, columnspan=2)
 
         self.deleteThisWSIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(40,40))
-        self.deleteThisWSBtn = ctk.CTkButton(self.deleteThisWSFrame, compound="left", text=" Confirm delete this WS.",image = self.deleteThisWSIcon, command= lambda x=self.deleteThisWSEntry , y=ws_obj, z=self.deleteThisWSERRLabel : self.deleteThisWSHanleBtnFunc(x,y,z), border_color="black", fg_color=("gray45","gray75"), anchor="center", text_color=("white","black"), font=("Helvetica", 15, "bold"), hover_color=("gray55","gray65"))
+        self.deleteThisWSBtn = ctk.CTkButton(self.deleteThisWSFrame, compound="left", text=" Confirm delete this WS.",image = self.deleteThisWSIcon, command= lambda x=self.deleteThisWSEntry , y=ws_obj, z=self.deleteThisWSERRLabel : self.deleteThisWSHanleBtnFunc(x,y,z), border_color="black", fg_color=("gray45","gray75"), anchor="center", text_color=("white","black"), font=("Helvetica", 15, "bold"), hover_color=("gray55","gray55"))
         self.deleteThisWSBtn.grid(row=3, column=1, columnspan=2)
 
 
@@ -650,7 +816,7 @@ class LabSyncDashBoard(ctk.CTk):
         self.newZonenameERRLabel.grid(row=3, column=1, columnspan=2)
 
         self.addToListIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"addToList.png")), size=(40,40))
-        self.saveNewZoneBtn = ctk.CTkButton(self.addNewZoneFrame, compound="left", text=" Create New Zone",image = self.addToListIcon, command= lambda x=self.newZonenameEntry , y=ws_obj, z=self.newZonenameERRLabel : self.createNewZoneFunc(x,y,z), border_color="black", fg_color=("gray45","gray75"), anchor="center", text_color=("white","black"), font=("Helvetica", 15, "bold"), hover_color=("gray55","gray65"))
+        self.saveNewZoneBtn = ctk.CTkButton(self.addNewZoneFrame, compound="left", text=" Create New Zone",image = self.addToListIcon, command= lambda x=self.newZonenameEntry , y=ws_obj, z=self.newZonenameERRLabel : self.createNewZoneFunc(x,y,z), border_color="black", fg_color=("gray45","gray75"), anchor="center", text_color=("white","black"), font=("Helvetica", 15, "bold"), hover_color=("gray55","gray55"))
         self.saveNewZoneBtn.grid(row=2, column=1, columnspan=2)
 
 
@@ -688,7 +854,15 @@ class LabSyncDashBoard(ctk.CTk):
         if funcToBtn is None:
             funcToBtn = self.button_func
 
-        self.newCard = ctk.CTkFrame(my_master, corner_radius=5, border_color="gray65", border_width=1, width=135, height=110,fg_color="gray75")
+        self.newCard = ctk.CTkFrame(
+            my_master,
+            corner_radius=14,
+            border_color=("gray78", "gray38"),
+            border_width=1,
+            width=135,
+            height=110,
+            fg_color=("gray88", "gray22"),
+        )
         self.newCard.rowconfigure(0,weight=1)
         # self.newCard.rowconfigure(1,weight=1)
         self.newCard.columnconfigure(0,weight=1)
@@ -696,8 +870,21 @@ class LabSyncDashBoard(ctk.CTk):
         # self.newIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_{cardtype}.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
         self.newIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_{cardtype}.png")), size=(40,40))
         
-        self.newButton = ctk.CTkButton(self.newCard, corner_radius=3,  border_spacing=10, compound="top", text=name, fg_color="transparent", command=funcToBtn , image=self.newIcon , anchor="center", border_color="black", hover_color=("gray85","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
-        self.newButton.grid(row=0, column=0, padx=10, pady=10)
+        self.newButton = ctk.CTkButton(
+            self.newCard,
+            corner_radius=10,
+            border_spacing=10,
+            compound="top",
+            text=name,
+            fg_color="transparent",
+            command=funcToBtn,
+            image=self.newIcon,
+            anchor="center",
+            hover_color=("gray70", "gray32"),
+            font=UI_FONT_BODY_BOLD,
+            text_color=("gray25", "gray90"),
+        )
+        self.newButton.grid(row=0, column=0, padx=6, pady=6)
 
         return self.newCard
 
@@ -706,13 +893,21 @@ class LabSyncDashBoard(ctk.CTk):
         if (master is None):
             master = self.tabsFrame
         
-        self.ThisZoneFrame = ctk.CTkFrame(master, width=500 ,fg_color=("#BABABA","#474747"))
+        self.ThisZoneFrame = ctk.CTkFrame(master, width=500, fg_color=("gray90", "gray16"), corner_radius=0)
         self.ThisZoneFrame.grid_columnconfigure(0,weight=1)
         self.ThisZoneFrame.grid_columnconfigure(1,weight=3)
         self.ThisZoneFrame.grid_rowconfigure(0, weight=1)
         self.ThisZoneFrame.grid_rowconfigure(1, weight=0)
 
-        self.pc_Frames = ctk.CTkScrollableFrame(self.ThisZoneFrame, width=220 , height=200)
+        self.pc_Frames = ctk.CTkScrollableFrame(
+            self.ThisZoneFrame,
+            width=240,
+            height=200,
+            corner_radius=16,
+            fg_color=("gray92", "gray18"),
+            border_width=1,
+            border_color=("gray80", "gray30"),
+        )
         computerCount=0
         computersList = zone_obj.get_all_computers()
         
@@ -734,7 +929,7 @@ class LabSyncDashBoard(ctk.CTk):
             self.newpcCard.grid(row = 0, column=1, padx=3, pady=3, sticky="nesw")
 
             self.deletepcRowIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(30,30)) 
-            self.deletepcRowBtn = ctk.CTkButton(self.pcrow, corner_radius=5, width=30, height=30,compound="top", text=" ",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=pc_obj, y=zone_obj, z=self.pcrow, w=self.checked_Pc_objs : self.deleteThisPcRowFromZone(x,y,z,w) , image=self.deletepcRowIcon ,hover_color=("gray70","gray30"), anchor="nesw", font=ctk.CTkFont(size=15, weight="bold"))
+            self.deletepcRowBtn = ctk.CTkButton(self.pcrow, corner_radius=5, width=30, height=30,compound="top", text=" ",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=pc_obj, y=zone_obj, z=self.pcrow, w=self.checked_Pc_objs : self.deleteThisPcRowFromZone(x,y,z,w) , image=self.deletepcRowIcon ,hover_color=("gray55","gray55"), anchor="nesw", font=ctk.CTkFont(size=15, weight="bold"))
             self.deleteBoxesZone.append(self.deletepcRowBtn)
             #self.deletepcRowBtn.grid(row=0, column=3, padx=10, pady=10, sticky="news")
             computerCount+=1
@@ -753,7 +948,15 @@ class LabSyncDashBoard(ctk.CTk):
 
         #Push And Commit section:
 
-        self.git_Frame = ctk.CTkFrame(self.ThisZoneFrame, width=200 , height=200, fg_color=("gray85","gray15"))
+        self.git_Frame = ctk.CTkFrame(
+            self.ThisZoneFrame,
+            width=200,
+            height=200,
+            corner_radius=18,
+            fg_color=("gray95", "gray17"),
+            border_width=1,
+            border_color=("gray82", "gray30"),
+        )
         self.git_Frame.grid_columnconfigure(0,weight=1)
         self.git_Frame.grid_columnconfigure(1,weight=1)
         self.git_Frame.grid_columnconfigure(2,weight=1)
@@ -766,17 +969,25 @@ class LabSyncDashBoard(ctk.CTk):
         self.git_Frame.grid_rowconfigure(3, weight=1)
         self.git_Frame.grid_rowconfigure(4, weight=1)
         self.git_Frame.grid_rowconfigure(5, weight=1)
-        self.git_Frame.grid(row=0, column=1, padx=10, pady=10, sticky="nesw")
+        self.git_Frame.grid(row=0, column=1, padx=12, pady=12, sticky="nesw")
 
-        self.zone_title_Label = ctk.CTkLabel(self.git_Frame, text=f"You are controlling: {zone_obj.Zone_name}", font=ctk.CTkFont(size=20, weight="bold"),text_color="white", bg_color="blue")
-        self.zone_title_Label.grid(row=0, column=1, columnspan=4, padx=0, pady=0, sticky="s")
+        self.zone_title_Label = ctk.CTkLabel(
+            self.git_Frame,
+            text=f"Zone · {zone_obj.Zone_name}",
+            font=UI_FONT_TITLE,
+            text_color=("white", "white"),
+            fg_color=("#1d4ed8", "#1d4ed8"),
+            corner_radius=12,
+            pady=12,
+            padx=16,
+        )
+        self.zone_title_Label.grid(row=0, column=1, columnspan=4, padx=12, pady=(12, 8), sticky="ew")
         
         self.markASFavIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"noFavIcon.png")), size=(50,50))
-        self.markASFavButton = ctk.CTkButton(self.git_Frame, text="", fg_color="gray35" ,image=self.markASFavIcon, width=50)
-        
+        self.markASFavButton = ctk.CTkButton(self.git_Frame, text="", fg_color=("gray82", "gray32"), image=self.markASFavIcon, width=50, corner_radius=12, hover_color=("gray70", "gray40"))
 
         self.unmarkFavIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"yesFavIcon.png")), size=(50,50))
-        self.unmarkFavButton = ctk.CTkButton(self.git_Frame, text="", fg_color="gray35" ,image=self.unmarkFavIcon, width=50)
+        self.unmarkFavButton = ctk.CTkButton(self.git_Frame, text="", fg_color=("gray82", "gray32"), image=self.unmarkFavIcon, width=50, corner_radius=12, hover_color=("gray70", "gray40"))
 
         self.markASFavButton.configure(command= lambda x=zone_obj, y=self.markASFavButton, z=self.unmarkFavButton: self.addToFavs(x,y,z))
 
@@ -787,15 +998,63 @@ class LabSyncDashBoard(ctk.CTk):
         else:
             self.markASFavButton.grid(row=0, column=5, sticky="sw")
             
-        self.editRowFrame = ctk.CTkFrame(self.ThisZoneFrame, height=70)
+        self.editRowFrame = ctk.CTkFrame(self.ThisZoneFrame, height=70, fg_color="transparent")
         self.editRowFrame.grid(row=1, column=0, columnspan=2, sticky="news")
 
 
-        self.git_title_Label = ctk.CTkLabel(self.git_Frame, text="Please write your commit to update the repo:",font=("Helvetica", 18, "bold"))
-        self.git_title_Label.grid(row=1, column=1, columnspan=4, padx=10, pady=10, sticky="s")
+        # Block Selection Dropdown
+        self.block_label = ctk.CTkLabel(
+            self.git_Frame,
+            text="Block:",
+            font=UI_FONT_BODY_BOLD,
+            text_color=("gray20", "gray90"),
+        )
+        self.block_label.grid(row=1, column=1, padx=12, pady=(4, 6), sticky="w")
 
-        self.git_comment_Textbox = ctk.CTkTextbox(self.git_Frame, width=400, height=100, wrap="word", font=("Helvetica", 18, "bold"))
-        self.git_comment_Textbox.grid(row=2, column=1, columnspan=4, padx=10, pady=10, sticky="n")
+        self.block_dropdown = ctk.CTkComboBox(
+            self.git_Frame,
+            values=["", "Block 2", "Block 3"],
+            state="readonly",
+            width=100,
+            font=UI_FONT_BODY,
+            corner_radius=8,
+            fg_color=("gray98", "gray12"),
+            border_color=("gray80", "gray35"),
+        )
+        self.block_dropdown.grid(row=1, column=2, padx=12, pady=(4, 6), sticky="w")
+        self.block_dropdown.set("")
+
+        # Checkbox for "Not using this parameter"
+        self.not_using_param_checkbox = ctk.CTkCheckBox(
+            self.git_Frame,
+            text="Not using this parameter",
+            font=UI_FONT_BODY,
+            checkbox_width=20,
+            checkbox_height=20,
+            command=self._on_not_using_param_toggle,
+        )
+        self.not_using_param_checkbox.grid(row=1, column=3, columnspan=2, padx=12, pady=(4, 6), sticky="w")
+
+        self.git_title_Label = ctk.CTkLabel(
+            self.git_Frame,
+            text="Commit message",
+            font=UI_FONT_BODY_BOLD,
+            text_color=("gray20", "gray90"),
+        )
+        self.git_title_Label.grid(row=2, column=1, columnspan=4, padx=12, pady=(4, 6), sticky="w")
+
+        self.git_comment_Textbox = ctk.CTkTextbox(
+            self.git_Frame,
+            width=400,
+            height=100,
+            wrap="word",
+            font=UI_FONT_BODY,
+            corner_radius=12,
+            fg_color=("gray98", "gray12"),
+            border_width=1,
+            border_color=("gray80", "gray35"),
+        )
+        self.git_comment_Textbox.grid(row=3, column=1, columnspan=4, padx=12, pady=(0, 8), sticky="n")
 
         self.errMsgPush = ctk.CTkLabel(self.editRowFrame, text="", text_color="red", font=ctk.CTkFont(weight="bold"))
         self.errMsgPush.grid(row=0, column=1, columnspan=3, sticky="news")
@@ -804,10 +1063,23 @@ class LabSyncDashBoard(ctk.CTk):
         # self.push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
         self.push_n_commit_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
         
-        self.Push_n_Commit_Btn = ctk.CTkButton(self.git_Frame, corner_radius=5,  border_spacing=10, compound="top", text="Push & Commit", fg_color="gray75", command= lambda x =self.errMsgPush, y = self.git_comment_Textbox: self.push_n_commit_Btn_Func(x,y) , image=self.push_n_commit_icon , anchor="center", border_color="black", hover_color=("gray55","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
-        self.Push_n_Commit_Btn.grid(row=3, column=2, columnspan=2, padx=10, pady=10, sticky="n")
+        self.Push_n_Commit_Btn = ctk.CTkButton(
+            self.git_Frame,
+            corner_radius=12,
+            border_spacing=10,
+            compound="top",
+            text="Push & Commit",
+            fg_color=("#2563eb", "#3b82f6"),
+            command=lambda x=self.errMsgPush, y=self.git_comment_Textbox: self.push_n_commit_Btn_Func(x, y),
+            image=self.push_n_commit_icon,
+            anchor="center",
+            hover_color=("#1d4ed8", "#2563eb"),
+            font=UI_FONT_BODY_BOLD,
+            text_color=("white", "white"),
+        )
+        self.Push_n_Commit_Btn.grid(row=4, column=2, columnspan=2, padx=12, pady=8, sticky="n")
 
-        self.git_progressbar = ctk.CTkProgressBar(self.git_Frame, width=400, height=5)
+        self.git_progressbar = ctk.CTkProgressBar(self.git_Frame, width=400, height=8, corner_radius=6, progress_color=("#2563eb", "#3b82f6"))
         #self.git_progressbar.configure(mode="indeterminate")
     
 
@@ -817,16 +1089,16 @@ class LabSyncDashBoard(ctk.CTk):
         self.deleteThisZoneerrLabel = ctk.CTkLabel(self.editRowFrame, text=f" " )
 
         self.deleteThisZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(30,30)) 
-        self.deleteThisZoneBTN = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text=" Delete This Zone",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=self.deleteThisZoneEntry, z=self.deleteThisZoneerrLabel : self.deleteThisZoneFunction(x,y,z) , image=self.deleteThisZoneIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
+        self.deleteThisZoneBTN = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text=" Delete This Zone",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=self.deleteThisZoneEntry, z=self.deleteThisZoneerrLabel : self.deleteThisZoneFunction(x,y,z) , image=self.deleteThisZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
         
         
 
         self.DoneEditZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DoneEdit.png")), size=(30,30))
-        self.DoneEditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Done Edit",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=master : self.zoneDetailsFrame(x,y) , image=self.DoneEditZoneIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
+        self.DoneEditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Done Edit",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=master : self.zoneDetailsFrame(x,y) , image=self.DoneEditZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
 
 
         self.EditZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "EditBtn.png")), size=(30,30))
-        self.EditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Edit",fg_color="transparent", text_color=("gray10", "gray90") , image=self.EditZoneIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
+        self.EditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Edit",fg_color="transparent", text_color=("gray10", "gray90") , image=self.EditZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
         listToShow = [self.DoneEditZoneBtn, self.deleteThisZoneBTN,self.deleteThisZoneLabel,self.deleteThisZoneEntry, self.deleteThisZoneerrLabel]
         self.EditZoneBtn.configure(command=lambda x=self.checkBoxesZone, y=self.deleteBoxesZone, z=listToShow, w=[self.EditZoneBtn] : self.makeThisZoneFrameEditable(x,y,z,w))
         self.EditZoneBtn.grid(row=0, column=0, sticky="news")
@@ -837,13 +1109,14 @@ class LabSyncDashBoard(ctk.CTk):
 
 # self.deletepcRowBtn = ctk.CTkButton(self.pcrow, corner_radius=5, width=60, height=40, border_spacing=10,
 # text="",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=self.pcrow, z=self.checked_Pc_objs : self. , image=deletepcRowIcon
-# ,hover_color=("gray70","gray30"), anchor="nesw", font=ctk.CTkFont(size=15, weight="bold"))
+# ,hover_color=("gray55","gray55"), anchor="nesw", font=ctk.CTkFont(size=15, weight="bold"))
 
     def addNewPcToThisZoneHandleFunc(self, zone_obj):
         pc_count = zone_obj.get_computer_count()
         temp_pc = Computer(pc_name = f"NewPC{pc_count+1} ☼")
         zone_obj.addComputer(temp_pc)
         dm.updateDB(WorkSpace_dict, appSettings)
+        self.homeWidget()
         self.zoneDetailsFrame(zone_obj)
 
     def deleteThisPcRowFromZone(self, pc_obj, zone_obj, rowToHide, checked_Pc_objs):
@@ -855,6 +1128,7 @@ class LabSyncDashBoard(ctk.CTk):
             if pc_obj in checked_Pc_objs:
                 checked_Pc_objs.remove(pc_obj)
             dm.updateDB(WorkSpace_dict, appSettings)
+            self.searchDictCreate()
 
         except Exception as e:
             print(f"Exception is: {e}.")
@@ -943,7 +1217,15 @@ class LabSyncDashBoard(ctk.CTk):
         if funcToBtn is None:
             funcToBtn = self.button_func
         res = False
-        self.newCard = ctk.CTkFrame(my_master, corner_radius=5, border_color="gray65", border_width=1, width=135, height=110,fg_color="gray75")
+        self.newCard = ctk.CTkFrame(
+            my_master,
+            corner_radius=14,
+            border_color=("gray78", "gray38"),
+            border_width=1,
+            width=135,
+            height=110,
+            fg_color=("gray88", "gray22"),
+        )
         self.newCard.rowconfigure(0,weight=1)
         # self.newCard.rowconfigure(1,weight=1)
         self.newCard.columnconfigure(0,weight=1)
@@ -964,8 +1246,21 @@ class LabSyncDashBoard(ctk.CTk):
                 self.redButton.grid(row=0, column=1, sticky="w")
         
         
-        self.newButton = ctk.CTkButton(self.newCard, corner_radius=3,  border_spacing=10, compound="left", text=name, fg_color="transparent", command=funcToBtn , image=self.newIcon , anchor="center", border_color="black", hover_color=("gray85","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
-        self.newButton.grid(row=0, column=0, padx=0, pady=10)
+        self.newButton = ctk.CTkButton(
+            self.newCard,
+            corner_radius=10,
+            border_spacing=10,
+            compound="left",
+            text=name,
+            fg_color="transparent",
+            command=funcToBtn,
+            image=self.newIcon,
+            anchor="center",
+            hover_color=("gray70", "gray32"),
+            font=UI_FONT_BODY_BOLD,
+            text_color=("gray25", "gray90"),
+        )
+        self.newButton.grid(row=0, column=0, padx=6, pady=6)
 
         return self.newCard
 
@@ -993,6 +1288,7 @@ class LabSyncDashBoard(ctk.CTk):
 
 
     def showHomePage(self):
+        self.homeWidget()
         self.tabsWidgetsFunc()
 
     def pc_checkBox_selected(self, pc_obj):
@@ -1005,270 +1301,692 @@ class LabSyncDashBoard(ctk.CTk):
 
         dm.updateDB(WorkSpace_dict, appSettings)
 
+    def pick_local_folder_into_entry(self, entry: ctk.CTkEntry, title: str = "Select folder"):
+        """Opens the OS folder picker and writes the path into the entry (paste still works)."""
+        folder = filedialog.askdirectory(parent=self, title=title, mustexist=True)
+        if not folder:
+            return
+        normalized = os.path.normpath(folder)
+        try:
+            was_disabled = str(entry.cget("state") or "").lower() == "disabled"
+        except Exception:
+            was_disabled = False
+        if was_disabled:
+            entry.configure(state="normal")
+        entry.delete(0, "end")
+        entry.insert(0, normalized)
+        if was_disabled:
+            entry.configure(state="disabled")
+
+    def _make_path_browse_button(self, parent, entry: ctk.CTkEntry, dialog_title: str):
+        return ctk.CTkButton(
+            parent,
+            text="Browse…",
+            width=92,
+            height=34,
+            corner_radius=10,
+            font=UI_FONT_SMALL,
+            fg_color=("#2563eb", "#3b82f6"),
+            text_color=("white", "white"),
+            hover_color=("#1d4ed8", "#2563eb"),
+            command=lambda: self.pick_local_folder_into_entry(entry, dialog_title),
+        )
 
     # def updateLabelWithColor(self, Label, msg, color = "red"){
     #     label.configure(text= " ")
     # }
 
-    def push_n_commit_Btn_Func(self, errMsgLabel, commit_box):
-        def handle_error(text = " ", ssh_client = None):
-            if ssh_client:
+    def _enqueue_ui(self, fn):
+        self._sync_job_queue.put(fn)
+
+    def _drain_sync_jobs(self):
+        try:
+            while True:
+                fn = self._sync_job_queue.get_nowait()
+                fn()
+        except queue.Empty:
+            pass
+        if self._sync_worker_running:
+            self.after(50, self._drain_sync_jobs)
+
+    def _set_git_sync_busy(self, busy: bool):
+        state = "disabled" if busy else "normal"
+        try:
+            self.Push_n_Commit_Btn.configure(state=state)
+        except Exception:
+            pass
+        try:
+            self.git_comment_Textbox.configure(state=state)
+        except Exception:
+            pass
+        try:
+            self.block_dropdown.configure(state="disabled" if busy else "readonly")
+        except Exception:
+            pass
+        try:
+            self.not_using_param_checkbox.configure(state=state)
+        except Exception:
+            pass
+
+    def _sync_ui_status(self, popup, msg, prog, stage):
+        self._enqueue_ui(lambda p=popup, m=msg, pr=prog, s=stage: p.update_status(m, pr, s))
+
+    def _display_path(self, path_value):
+        if path_value is None:
+            return ""
+        return os.path.normpath(str(path_value))
+
+    def _show_topmost_warning(self, title, text):
+        """Show a warning dialog above all app windows so it does not hide behind progress popups."""
+        owner = None
+        try:
+            owner = ctk.CTkToplevel(self)
+            owner.withdraw()
+            owner.attributes("-topmost", True)
+            owner.lift()
+            owner.focus_force()
+            messagebox.showwarning(title, text, parent=owner)
+        except Exception:
+            messagebox.showwarning(title, text)
+        finally:
+            if owner is not None:
+                try:
+                    owner.destroy()
+                except Exception:
+                    pass
+
+    def _sync_pipeline_error(self, text, errMsgLabel, commit_box, currstatpopup, ssh_client=None):
+        if ssh_client:
+            try:
                 ssh_client.close()
-            messagebox.showwarning("Invalid input", text)
+            except Exception:
+                pass
+
+        def run():
+            try:
+                currstatpopup.destroy()
+            except Exception:
+                pass
+            self._show_topmost_warning("Invalid input", text)
             errMsgLabel.configure(text=text, text_color="red")
             print(text)
             self.git_progressbar.stop()
             self.git_progressbar.configure(mode="determinate")
             self.git_progressbar.set(0)
-            commit_box.configure(state='normal')
-            commit_box.delete("0.0","end")
-            return
+
+        self._enqueue_ui(run)
+
+    def _on_not_using_param_toggle(self):
+        """Ask for password when the 'Not using this parameter' checkbox is toggled on."""
+        if self.not_using_param_checkbox.get():  # just got checked
+            dialog = CTkInputDialog(
+                text="Enter password to enable this option:",
+                title="Password Required",
+            )
+            password = dialog.get_input()
+            if password != "admin":
+                self.not_using_param_checkbox.deselect()
+                return
+            # Correct password — disable and gray the block dropdown
+            self.block_dropdown.configure(state="disabled")
+        else:
+            # Unchecked — re-enable the block dropdown
+            self.block_dropdown.configure(state="readonly")
+
+    def _sync_pipeline_success(self, errMsgLabel, commit_box, currstatpopup):
+        def run():
+            self.git_progressbar.stop()
+            self.git_progressbar.configure(mode="determinate")
+            self.git_progressbar.set(1.0)
+            currstatpopup.update_status("Successful", 1.0, "Done")
+            errMsgLabel.configure(text="Successfull", text_color="green")
+            commit_box.delete("0.0", "end")
+            # Reset checkbox and re-enable dropdown after successful push
+            self.not_using_param_checkbox.deselect()
+            self.block_dropdown.configure(state="readonly")
+            currstatpopup.close_with_delay()
+
+        self._enqueue_ui(run)
+
+    def _finish_commit_confirm_dialog(self, win, on_result, confirmed):
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        if on_result:
+            on_result(confirmed)
+
+    def _wait_for_commit_confirmation(self, diffsToAdd, errMsgLabel):
+        done_event = threading.Event()
+        holder = {"ok": False}
+
+        def on_result(confirmed):
+            holder["ok"] = confirmed
+            done_event.set()
+
+        self._enqueue_ui(lambda: self.gitShowUnstaggedFiles(diffsToAdd, errMsgLabel, on_result=on_result))
+        done_event.wait()
+        return holder["ok"]
+
+    def _wait_for_folder_diff_confirmation(self, folder_diffs, errMsgLabel):
+        done_event = threading.Event()
+        holder = {"ok": False}
+
+        def on_result(confirmed):
+            holder["ok"] = confirmed
+            done_event.set()
+
+        self._enqueue_ui(lambda: self.showFolderDiffPopup(folder_diffs, errMsgLabel, on_result=on_result))
+        done_event.wait()
+        return holder["ok"]
+
+    def push_n_commit_Btn_Func(self, errMsgLabel, commit_box):
         errMsgLabel.configure(text=" ", text_color="red")
 
-        # self.git_progressbar.grid(row=4, column=2, columnspan=2, padx=10, pady=10, sticky="n")        
         if len(self.checked_Pc_objs) < 1:
-            handle_error(text="You should select at least one PC.")
+            messagebox.showwarning("Invalid input", "You should select at least one PC.")
+            errMsgLabel.configure(text="You should select at least one PC.", text_color="red")
             return
 
-        commit_msg = commit_box.get(0.0,"end")
-        if  not bool(re.search(r'[a-zA-Z]', commit_msg)):
-            handle_error(text="You should write a commit to push.")
-            # self.git_progressbar.stop()
-            # self.git_progressbar.configure(mode="determinate")
-            # self.git_progressbar.set(0)
+        commit_msg = commit_box.get(0.0, "end")
+        if not bool(re.search(r"[a-zA-Z]", commit_msg)):
+            messagebox.showwarning("Invalid input", "You should write a commit to push.")
+            errMsgLabel.configure(text="You should write a commit to push.", text_color="red")
             return
-        currstatpopup = StatusPopup(self, "Updates: ", "Starting...")
-        
-#----------------------------------------------------
-        #first Count loop:
-        print("first Count loop")
-        currstatpopup.update_status("Counting how many Files/Folders needs to be copy", 0.1)
-        firstCount = 0
-        self.reposPaths = {}
-        isMoreThanOneRepo = False
-        allrepos_Sets = set()
+
+        # Get the selected block and checkbox state
+        selected_block = self.block_dropdown.get()
+        is_not_using_param = self.not_using_param_checkbox.get()
+
+        # Validate that a block is selected when not using parameter is unchecked
+        if not is_not_using_param and not selected_block.strip():
+            messagebox.showwarning("Invalid input", "You must select a block or check 'Not using this parameter'.")
+            errMsgLabel.configure(text="You must select a block.", text_color="red")
+            return
+
+        # If checkbox is not checked, prepend the block to the comment
+        if not is_not_using_param:
+            commit_msg = f"{selected_block.strip()}: {commit_msg}"
+
+        currstatpopup = StatusPopup(self, "Updates: ", "Starting…")
+        currstatpopup.update_status("Starting synchronization…", 0.0, "Step 1/6: Fetch & Pull")
+
+        self._set_git_sync_busy(True)
+        commit_box.configure(state="disabled")
+
+        self._sync_worker_running = True
+        self.after(50, self._drain_sync_jobs)
+
+        def worker():
+            try:
+                self._run_git_sync_pipeline(currstatpopup, errMsgLabel, commit_box, commit_msg)
+            finally:
+                self._sync_worker_running = False
+                self._enqueue_ui(lambda: self._set_git_sync_busy(False))
+                self._enqueue_ui(lambda: commit_box.configure(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_git_sync_pipeline(self, currstatpopup, errMsgLabel, commit_box, commit_msg):
+        commit_confirm_already_done = False
+        self._sync_ui_status(currstatpopup, "Fetching and pulling remote repositories…", 0.05, "Step 1: Fetching and pulling")
+
+        repos_fetched = set()
         for pc in self.checked_Pc_objs:
-            thispcRepos_Set = set()
-            for pathToDo in (pc.pathFiles.values()):
+            for pathToDo in pc.pathFiles.values():
                 ssh_client = None
                 try:
-                    
                     ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
-                    if ssh_client:
-                        print("Connection test successful")
-                        input_folder=repr(pathToDo['inputfolder'])[1:-1]
-                        output_dir=repr(pathToDo['OutputDir'])[1:-1]
-                        print(f"inputfolder == {input_folder}\n outputdir == {output_dir}")
-                        firstCount+= self.count_only_files(ssh_client, input_folder, file_type=pathToDo['FileType'])
-                        currstatpopup.update_status(f"found {firstCount} files/folders", 0.15)
-                        try:
-                            currRepo = self.find_nearest_git_root_remote(ssh_client, output_dir)
-                            if (currRepo is not None):
-                                allrepos_Sets.add(currRepo)
-                                thispcRepos_Set.add(currRepo)
-                                ###ONLY FOR DEBUGGING:::
-                                # print(f"found this repo: {currRepo}")
-                                
-
-                            else:
-                                handle_error(f"couldn't find repo?? (NO Exception)", ssh_client)
-                                return
-                        except Exception as e:
-                            handle_error(f"couldn't find repo?? : {e}" , ssh_client)
-                            return
-
-                    else:
-                            handle_error(f"failed to connect to the pc: {pc.pc_name}",ssh_client)
-                            return
-
+                    if not ssh_client:
+                        self._sync_pipeline_error(
+                            f"failed to connect to the pc: {pc.pc_name}",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                        )
+                        return
+                    output_dir = self._display_path(pathToDo["OutputDir"])
+                    self._sync_ui_status(
+                        currstatpopup,
+                        f"Checking Git at destination…\nPC: {pc.pc_name}\nOutput: {output_dir}",
+                        0.08,
+                        "Step 1/6: Fetch & Pull",
+                    )
+                    repo_path, dest_err = self.check_destination_git_before_sync_remote(
+                        ssh_client, output_dir
+                    )
+                    if dest_err:
+                        self._sync_pipeline_error(
+                            dest_err,
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                            ssh_client,
+                        )
+                        return
+                    if repo_path in repos_fetched:
+                        self._sync_ui_status(
+                            currstatpopup,
+                            f"Already updated this repo (skipping duplicate fetch).\n"
+                            f"PC: {pc.pc_name}\nRepo: {repo_path}\nDestination: {output_dir}",
+                            0.12,
+                            "Step 1/6: Fetch & Pull",
+                        )
+                        continue
+                    branch_name = self.get_current_branch_remote(ssh_client, repo_path)
+                    if branch_name is None:
+                        self._sync_pipeline_error(
+                            "Could not determine current branch.",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                            ssh_client,
+                        )
+                        return
+                    self._sync_ui_status(
+                        currstatpopup,
+                        f"Fetching & pulling remote…\n"
+                        f"PC: {pc.pc_name}\n"
+                        f"Git repo (root): {repo_path}\n"
+                        f"Branch: {branch_name}\n"
+                        f"Destination used to locate repo: {output_dir}",
+                        0.14,
+                        "Step 1/6: Fetch & Pull",
+                    )
+                    pulled = self.remote_fetch_and_pull(ssh_client, repo_path, branch_name)
+                    if not pulled:
+                        self._sync_pipeline_error(
+                            f"Git pull could not complete for {repo_path} (merge conflict or remote issue). Resolve on the remote PC and retry.",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                            ssh_client,
+                        )
+                        return
+                    repos_fetched.add(repo_path)
+                    self._sync_ui_status(
+                        currstatpopup,
+                        f"Fetch & pull finished.\n"
+                        f"PC: {pc.pc_name}\n"
+                        f"Repository: {repo_path}\n"
+                        f"Branch: {branch_name}",
+                        0.18,
+                        "Step 1/6: Fetch & Pull",
+                    )
                 except Exception as e:
-                    handle_error(f"{e}",ssh_client)
+                    self._sync_pipeline_error(
+                        f"An error occurred during fetch/pull: {e}",
+                        errMsgLabel,
+                        commit_box,
+                        currstatpopup,
+                        ssh_client,
+                    )
                     return
                 finally:
                     if ssh_client:
                         ssh_client.close()
 
-                        
+        self._sync_ui_status(currstatpopup, "Counting files scheduled to copy…", 0.24, "Step 2/6: Count")
+        firstCount = 0
+        self.reposPaths = {}
+        allrepos_Sets = set()
+        for pc in self.checked_Pc_objs:
+            thispcRepos_Set = set()
+            for pathToDo in pc.pathFiles.values():
+                ssh_client = None
+                try:
+                    ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
+                    if not ssh_client:
+                        self._sync_pipeline_error(
+                            f"failed to connect to the pc: {pc.pc_name}",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                        )
+                        return
+                    input_folder = self._display_path(pathToDo["inputfolder"])
+                    output_dir = self._display_path(pathToDo["OutputDir"])
+                    firstCount += self.count_only_files(ssh_client, input_folder, file_type=pathToDo["FileType"])
+                    self._sync_ui_status(
+                        currstatpopup,
+                        f"Counted {firstCount} file(s)/folder(s) scheduled so far…",
+                        0.30,
+                        "Step 2/6: Count",
+                    )
+                    currRepo = self.find_nearest_git_root_remote(ssh_client, output_dir)
+                    if currRepo is None:
+                        self._sync_pipeline_error(
+                            "couldn't find repo?? (NO Exception)",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                            ssh_client,
+                        )
+                        return
+                    allrepos_Sets.add(currRepo)
+                    thispcRepos_Set.add(currRepo)
+                except Exception as e:
+                    self._sync_pipeline_error(str(e), errMsgLabel, commit_box, currstatpopup, ssh_client)
+                    return
+                finally:
+                    if ssh_client:
+                        ssh_client.close()
             if len(thispcRepos_Set) > 0:
                 self.reposPaths[pc] = thispcRepos_Set
 
         if firstCount == 0:
-            currstatpopup.update_status("No such files found to copy, please check if you already copied your data.", 0.2)
-            handle_error("No such files found to copy, please check if you already copied your data.")
+            self._sync_ui_status(
+                currstatpopup,
+                "No files found to copy (inputs may be empty). Skipping delete/copy.",
+                0.32,
+                "Step 2/6: Count",
+            )
 
+        if len(allrepos_Sets) > 1:
+            self._enqueue_ui(lambda: currstatpopup.close_with_delay(delay=1))
+            self._sync_pipeline_error(
+                "Please check your gits folder' you have to pick only one to commit.",
+                errMsgLabel,
+                commit_box,
+                currstatpopup,
+            )
+            self._enqueue_ui(lambda: self.repoWarningPopup(self.reposPaths))
+            return
 
-        currstatpopup.update_status(f"found {firstCount} files/folders to copy.", 0.2)
-        #self.git_progressbar.start()
-        commit_box.configure(state='disabled')
-
-
-        # -----------------------------------------------------------------
-        # Fetch and pull first:
-        currstatpopup.update_status(f"Fetch and pull first to update.", 0.25)
-        for pc, repo_set in self.reposPaths.items():
-                for repo_path in repo_set:
-                    try:
-                        ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
-                        branch_name = self.get_current_branch_remote(ssh_client, repo_path)
-                        print(f"branch_name found to fetch and pull: {branch_name}")
-                        currstatpopup.update_status(f"Fetch and pull first to update\n you currect in branch name = {branch_name}", 0.25)                                             
-                        pulled = self.remote_fetch_and_pull(ssh_client, repo_path, branch_name)
-                        
-                        if pulled:
-                            print(f"Fetched and Pulled")
-                            currstatpopup.update_status(f"Fetched and Pulled in branch name = {branch_name}", 0.3) 
-                        else:
-                            print(f"err while trying to pull ? (or nothing to pull)")
-                            handle_error(f"err while trying to pull ? (or nothing to pull)")
-                            currstatpopup.update_status(f"err while trying to pull ? (or nothing to pull) in branch name = {branch_name}", 0.3)
-
-
-                        ssh_client.close()
-                    except Exception as e:
-                        print(f"An error occurred: {e}")
-                        handle_error(f"An error occurred: {e}")
-                        errMsgLabel.configure(text=f"An error occurred: {e}")
-                        commit_box.configure(state='normal')
-                        self.git_progressbar.stop()
-                        self.git_progressbar.configure(mode="determinate")
-                        self.git_progressbar.set(0)
-        
-
-
-        #----------------------------------------------------
-        #copy files loop: (after we validate that at least 1 file to copy)
-        # self.reposPaths = {}
-        # isMoreThanOneRepo = False
-        # allrepos_Sets = set()
-        currstatpopup.update_status(f"starting copy files", 0.35)
-        count = 0
+        # ── Step 2.5: Folder diff ──────────────────────────────────────────
+        self._sync_ui_status(
+            currstatpopup,
+            "Comparing source vs destination folders…",
+            0.34,
+            "Step 3/6: Folder diff",
+        )
+        all_folder_diffs = {}
+        folder_diff_jobs = []
+        total_diff_ops = 0
         for pc in self.checked_Pc_objs:
-            # thispcRepos_Set = set()
-            for pathToDo in (pc.pathFiles.values()):
+            for pathToDo in pc.pathFiles.values():
+                ssh_client = None
                 try:
-                    inputdir =repr(pathToDo['inputfolder'])[1:-1]
-                    output_dir=repr(pathToDo['OutputDir'])[1:-1]
-                    if(firstCount):
-                        currstatpopup.update_status(f"starting copy files\n From = {inputdir}\n To = {output_dir} ", 0.35+(count/firstCount)*0.5)
-                    else:
-                        currstatpopup.update_status(f"starting copy files\n From = {inputdir}\n To = {output_dir} ", 0.85)
-                    try:
-                        ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
-                        if ssh_client:
-                            print("Connection test successful")
-                            count+= self.copy_files_by_type(ssh_client, source_folder=inputdir, file_type=pathToDo['FileType'], destination_folder=output_dir)
-                            # self.git_progressbar.set((count/firstCount)*0.5)
-                            
-                        else:
-                            handle_error(f"failed to connect to the pc: {pc.pc_name}", ssh_client)
-                            
-                    except Exception as e:
-                        handle_error(f"{e}", ssh_client)
-                    
-                        
+                    ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
+                    if not ssh_client:
+                        self._sync_pipeline_error(
+                            f"failed to connect to the pc: {pc.pc_name}",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                        )
+                        return
+                    inputdir = self._display_path(pathToDo["inputfolder"])
+                    output_dir = self._display_path(pathToDo["OutputDir"])
+                    diffs = self.compare_folders_remote(
+                        ssh_client, inputdir, output_dir, pathToDo["FileType"]
+                    )
+                    folder_diff_jobs.append(
+                        {
+                            "pc": pc,
+                            "inputdir": inputdir,
+                            "output_dir": output_dir,
+                            "diffs": diffs,
+                        }
+                    )
+                    total_diff_ops += len(diffs)
+                    for rel_path, info in diffs.items():
+                        key = f"[{pc.pc_name}]  {output_dir} :: {rel_path}"
+                        all_folder_diffs[key] = {
+                            "file": key,
+                            "type": info["type"],
+                        }
                 except Exception as e:
-                    handle_error(f"Copied {count} / {firstCount} files until ---> {e}", ssh_client)
-                    currstatpopup.update_status(f"Copied {count} / {firstCount} files until ---> {e}", 0.35)
-
+                    self._sync_pipeline_error(
+                        str(e), errMsgLabel, commit_box, currstatpopup, ssh_client
+                    )
+                    return
                 finally:
                     if ssh_client:
                         ssh_client.close()
-            
-        
-        if (len(allrepos_Sets) > 1):
-            currstatpopup.close_with_delay(delay=1)
-            handle_error("Please check your gits folder' you have to pick only one to commit.")
-            self.repoWarningPopup(self.reposPaths)
 
-            return 0
+        if total_diff_ops > 0:
+            if not self._wait_for_folder_diff_confirmation(all_folder_diffs, errMsgLabel):
 
+                def diff_cancelled():
+                    errMsgLabel.configure(text="User cancelled operation")
+                    self.git_progressbar.stop()
+                    self.git_progressbar.configure(mode="determinate")
+                    self.git_progressbar.set(0)
+                    try:
+                        currstatpopup.destroy()
+                    except Exception:
+                        pass
+
+                self._enqueue_ui(diff_cancelled)
+                return
+            # User already approved the exact file operations for this run.
+            commit_confirm_already_done = True
+        # ──────────────────────────────────────────────────────────────────
+
+        count = 0
+        if total_diff_ops > 0:
+            self._sync_ui_status(
+                currstatpopup,
+                "Applying folder diffs…",
+                0.38,
+                "Step 3/6: File operations",
+            )
+            ops_done = 0
+            denom = total_diff_ops if total_diff_ops else 1
+            for job in folder_diff_jobs:
+                if len(job["diffs"]) == 0:
+                    continue
+                ssh_client = None
+                try:
+                    pc = job["pc"]
+                    inputdir = job["inputdir"]
+                    output_dir = job["output_dir"]
+                    prog = 0.38 + (ops_done / denom) * 0.32
+                    self._sync_ui_status(
+                        currstatpopup,
+                        f"Applying diffs…\nFrom: {inputdir}\nTo: {output_dir}",
+                        min(prog, 0.70),
+                        "Step 3/6: File operations",
+                    )
+                    ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
+                    if not ssh_client:
+                        self._sync_pipeline_error(
+                            f"failed to connect to the pc: {pc.pc_name}",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                        )
+                        return
+                    count += self.apply_folder_diffs_remote(
+                        ssh_client,
+                        source_folder=inputdir,
+                        destination_folder=output_dir,
+                        diffs=job["diffs"],
+                    )
+                    ops_done += len(job["diffs"])
+                except Exception as e:
+                    self._sync_pipeline_error(str(e), errMsgLabel, commit_box, currstatpopup, ssh_client)
+                    return
+                finally:
+                    if ssh_client:
+                        ssh_client.close()
         else:
-            if (count < 1) or (len(self.reposPaths) < 1):
-                handle_error(text="You have to configure 'destination file path' inside a git folder to commit & push.")
-                errMsgLabel.configure(text="You have to configure 'destination file path' inside a git folder to commit & push.")
-                commit_box.configure(state='normal')
+            self._sync_ui_status(
+                currstatpopup,
+                "No folder differences detected. Skipping file operations.",
+                0.40,
+                "Step 3/6: File operations",
+            )
+
+        if len(self.reposPaths) < 1:
+
+            def run():
+                messagebox.showwarning(
+                    "Invalid input",
+                    "You have to configure 'destination file path' inside a git folder to commit & push.",
+                )
+                errMsgLabel.configure(
+                    text="You have to configure 'destination file path' inside a git folder to commit & push.",
+                    text_color="red",
+                )
                 self.git_progressbar.stop()
                 self.git_progressbar.configure(mode="determinate")
                 self.git_progressbar.set(0)
-                return
-            currstatpopup.update_status(f"Checking the changes to push and commit", 0.85)
-            for pc, repo_set in self.reposPaths.items():
-                for repo_path in repo_set:
-                    ssh_client = None
-                    try:
-                        ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
-                        
-                        is_dirty , self.diffsToAdd = self.check_repo_status_remote(ssh_client,repo_path)
-                        
-                        current_branch = self.get_current_branch_remote(ssh_client, repo_path)
-                        print(f"curr_branch is: = {current_branch}")
-                        
-                        if current_branch is None:
-                            return
-                        
-                        if (is_dirty):
-                            errMsgLabel.configure(text=" ")
-                            self.WantToContinue = False
-                            popup_window = self.gitShowUnstaggedFiles(self.diffsToAdd, errMsgLabel)
-                            self.wait_window(popup_window)
-                            if (self.WantToContinue is None) or (self.WantToContinue is not True):
+                try:
+                    currstatpopup.destroy()
+                except Exception:
+                    pass
 
+            self._enqueue_ui(run)
+            return
+
+        for pc, repo_set in self.reposPaths.items():
+            for repo_path in repo_set:
+                ssh_client = None
+                try:
+                    ssh_client = self.create_ssh_connection(pc.host_name, pc.user_name, pc.password)
+                    if not ssh_client:
+                        self._sync_pipeline_error(
+                            f"failed to connect to the pc: {pc.pc_name}",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                        )
+                        return
+
+                    self._sync_ui_status(
+                        currstatpopup,
+                        "Checking repository changes…",
+                        0.72,
+                        "Step 4/6: Confirm commit",
+                    )
+                    is_dirty, self.diffsToAdd = self.check_repo_status_remote(ssh_client, repo_path)
+                    current_branch = self.get_current_branch_remote(ssh_client, repo_path)
+                    print(f"curr_branch is: = {current_branch}")
+
+                    if current_branch is None:
+                        self._sync_pipeline_error(
+                            "Could not determine current branch.",
+                            errMsgLabel,
+                            commit_box,
+                            currstatpopup,
+                            ssh_client,
+                        )
+                        return
+
+                    if is_dirty:
+                        self._enqueue_ui(lambda: errMsgLabel.configure(text=" "))
+                        if (not commit_confirm_already_done) and (not self._wait_for_commit_confirmation(self.diffsToAdd, errMsgLabel)):
+
+                            def cancelled():
                                 errMsgLabel.configure(text="User cancelled operation")
-                                commit_box.configure(state='normal')
                                 self.git_progressbar.stop()
                                 self.git_progressbar.configure(mode="determinate")
                                 self.git_progressbar.set(0)
-                                return
-                            else:
-                                currstatpopup.update_status(f"Pushing & Commit Please wait", 0.9)
-                                errMsgLabel.configure(text="Pushing & Commit Please wait")
                                 try:
-                                    posted = self.commit_and_push_remote(ssh_client, repo_path, current_branch, commit_msg)
-                                
-                                    if posted:
-                                        self.git_progressbar.stop()
-                                        self.git_progressbar.configure(mode="determinate")
-                                        self.git_progressbar.set(100)
-                                        currstatpopup.update_status(f"Successfull", 1.0)
-                                        errMsgLabel.configure(text="Successfull", text_color="green")
-                                        commit_box.configure(state='normal')
-                                        commit_box.delete("0.0", "end")
-                                        currstatpopup.close_with_delay()
-                                    else:
-                                        print("Didnt pushed. posted = False.")
-                                except Exception as e:
-                                    print(f"err??? -> {e}")
-                                    errMsgLabel.configure(text=f"err??? -> {e}")
-                                    commit_box.configure(state='normal')
-                                    self.git_progressbar.stop()
-                                    self.git_progressbar.configure(mode="determinate")
-                                    self.git_progressbar.set(0)
-                                    return
-                        else:
-                            currstatpopup.update_status(f"No changes to commit.", 0.9)
-                            errMsgLabel.configure(text="No changes to commit.", text_color="red")
-                            currstatpopup.close_with_delay()
-                            commit_box.configure(state='normal')
+                                    currstatpopup.destroy()
+                                except Exception:
+                                    pass
+
+                            self._enqueue_ui(cancelled)
+                            return
+                        elif commit_confirm_already_done:
+                            self._sync_ui_status(
+                                currstatpopup,
+                                "Commit preview skipped (already confirmed folder diff).",
+                                0.80,
+                                "Step 4/6: Confirm commit",
+                            )
+
+                        self._sync_ui_status(
+                            currstatpopup,
+                            "Committing changes…",
+                            0.86,
+                            "Step 5/6: Commit",
+                        )
+                        self._enqueue_ui(lambda: errMsgLabel.configure(text="Committing…"))
+
+                        try:
+                            committed_ok = self.commit_remote(ssh_client, repo_path, current_branch, commit_msg)
+                            if not committed_ok:
+                                self._sync_pipeline_error(
+                                    "Commit failed or did not complete.",
+                                    errMsgLabel,
+                                    commit_box,
+                                    currstatpopup,
+                                    ssh_client,
+                                )
+                                return
+                        except Exception as e:
+                            self._sync_pipeline_error(
+                                f"Commit error: {e}",
+                                errMsgLabel,
+                                commit_box,
+                                currstatpopup,
+                                ssh_client,
+                            )
+                            return
+
+                        self._sync_ui_status(
+                            currstatpopup,
+                            "Pushing to remote…",
+                            0.94,
+                            "Step 6/6: Push",
+                        )
+                        self._enqueue_ui(lambda: errMsgLabel.configure(text="Pushing…"))
+
+                        try:
+                            pushed_ok = self.push_remote(ssh_client, repo_path, current_branch)
+                            if pushed_ok:
+                                self._sync_pipeline_success(errMsgLabel, commit_box, currstatpopup)
+                            else:
+                                self._sync_pipeline_error(
+                                    "Push failed or did not complete.",
+                                    errMsgLabel,
+                                    commit_box,
+                                    currstatpopup,
+                                    ssh_client,
+                                )
+                                return
+                        except Exception as e:
+                            self._sync_pipeline_error(
+                                f"Push error: {e}",
+                                errMsgLabel,
+                                commit_box,
+                                currstatpopup,
+                                ssh_client,
+                            )
+                            return
+                    else:
+
+                        def no_changes():
+                            currstatpopup.update_status("No changes to commit.", 1.0, "Done")
+                            errMsgLabel.configure(text="No changes to commit.", text_color="#d97706")
+                            try:
+                                currstatpopup.destroy()
+                            except Exception:
+                                pass
                             self.git_progressbar.stop()
                             self.git_progressbar.configure(mode="determinate")
                             self.git_progressbar.set(0)
-                        ssh_client.close()
-                    except Exception as e:
-                        print(f"An error occurred hereee line 575: {e}")
-                        errMsgLabel.configure(text=f"An error occurred: {e}")
-                        commit_box.configure(state='normal')
-                        self.git_progressbar.stop()
-                        self.git_progressbar.configure(mode="determinate")
-                        self.git_progressbar.set(0)
-                    finally:
-                        if ssh_client:
-                            ssh_client.close()
-                        try:
-                            currstatpopup.close_with_delay()
-                        except Excepetion as e:
-                            print(e)
 
-            return count
+                        self._enqueue_ui(no_changes)
+                except Exception as e:
+                    print(f"An error occurred in git sync pipeline: {e}")
+                    self._sync_pipeline_error(
+                        f"An error occurred: {e}",
+                        errMsgLabel,
+                        commit_box,
+                        currstatpopup,
+                        ssh_client,
+                    )
+                    return
+                finally:
+                    if ssh_client:
+                        ssh_client.close()
+
+        return count
 
 
     def check_repo_status_remote(self, ssh_client: paramiko.SSHClient, repo_path: str):
@@ -1339,103 +2057,91 @@ class LabSyncDashBoard(ctk.CTk):
     def remote_fetch_and_pull(self, ssh_client, repo_path, branch_name):
         print(f"DEBUG: Starting remote_fetch_and_pull for branch: {branch_name} in path: {repo_path}")
         escaped_path = repo_path.replace("/", "\\").replace("'", "''")
-        
+
         fetch_command = (
             f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
             f"\"Set-Location -Path '{escaped_path}'; git fetch --all\""
         )
         print(f"DEBUG: Executing fetch command: {fetch_command}")
-        
-        stdin, stdout, stderr = ssh_client.exec_command(fetch_command)
-        fetch_errors = stderr.read().decode('utf-8').strip()
-        fetch_output = stdout.read().decode('utf-8').strip()
-        
-        print(f"DEBUG: Fetch Output (stdout): {fetch_output}")
-        print(f"DEBUG: Fetch Errors (stderr): {fetch_errors}")
 
-        if fetch_errors and any(keyword in fetch_errors.lower() for keyword in ["fatal", "error", "failed", "permission denied"]):
-            raise Exception(f"Git Fetch failed: {fetch_errors}")
+        stdin, stdout, stderr = ssh_client.exec_command(fetch_command)
+        fetch_out = stdout.read().decode("utf-8", errors="replace").strip()
+        fetch_err = stderr.read().decode("utf-8", errors="replace").strip()
+        fetch_code = stdout.channel.recv_exit_status()
+
+        print(f"DEBUG: Fetch stdout: {fetch_out}")
+        print(f"DEBUG: Fetch stderr: {fetch_err}")
+        print(f"DEBUG: Fetch exit: {fetch_code}")
+
+        if fetch_code != 0:
+            raise Exception(f"Git Fetch failed (exit {fetch_code}): {fetch_err or fetch_out}")
 
         pull_command = (
             f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
             f"\"Set-Location -Path '{escaped_path}'; git pull origin {branch_name}\""
         )
         print(f"DEBUG: Executing explicit pull command: {pull_command}")
-        
-        stdin, stdout, stderr = ssh_client.exec_command(pull_command)
-        pull_output = stdout.read().decode('utf-8').strip()
-        pull_errors = stderr.read().decode('utf-8').strip()
-        
-        print(f"DEBUG: Pull Output (stdout): {pull_output}")
-        print(f"DEBUG: Pull Errors (stderr): {pull_errors}")
 
-        if pull_errors and any(keyword in pull_errors.lower() for keyword in ["fatal", "error", "failed", "permission denied"]):
-            raise Exception(f"Git Pull failed: {pull_errors}")
-            
-        if "conflict" in pull_output.lower():
+        stdin, stdout, stderr = ssh_client.exec_command(pull_command)
+        pull_out = stdout.read().decode("utf-8", errors="replace").strip()
+        pull_err = stderr.read().decode("utf-8", errors="replace").strip()
+        pull_code = stdout.channel.recv_exit_status()
+        combined_pull = f"{pull_out}\n{pull_err}".strip()
+
+        print(f"DEBUG: Pull stdout: {pull_out}")
+        print(f"DEBUG: Pull stderr: {pull_err}")
+        print(f"DEBUG: Pull exit: {pull_code}")
+
+        if pull_code != 0:
+            raise Exception(f"Git Pull failed (exit {pull_code}): {combined_pull}")
+
+        if "conflict" in combined_pull.lower():
             print("DEBUG: WARNING: Merge conflict detected!")
             return False
-            
+
         print(f"DEBUG: Fetch and Pull completed successfully for branch: {branch_name}")
         return True
 
-        # escaped_path = repo_path.replace("'", "''")
-        
-        # fetch_command = f'Set-Location -Path "{escaped_path}" ; git fetch --all'
-        # try:
-        #     stdin, stdout, stderr = ssh_client.exec_command(fetch_command)
-        #     fetch_errors = stderr.read().decode('utf-8').strip()
-        #     if fetch_errors:
-        #         return False
-        # except Exception as e:
-        #     raise Exception (f"expection= {e}")
-
-        # pull_command = f'Set-Location -Path "{escaped_path}" ; git pull'
-        # try:
-        #     stdin, stdout, stderr = ssh_client.exec_command(pull_command)
-        #     pull_output = stdout.read().decode('utf-8').strip()
-        #     pull_errors = stderr.read().decode('utf-8').strip()
-        # except Exception as e:
-        #     raise Exception (f"expection= {e}")
-
-        # if pull_errors:
-        #     return False
-            
-        # if "conflict" in pull_output.lower():
-        #     return False
-        # return True
-
-
-    def commit_and_push_remote(self, ssh_client: paramiko.SSHClient, repo_path: str, branch_name: str, commit_message: str):
-        print(f"Now we are trying to commit with folder: {repo_path}")
+    def commit_remote(self, ssh_client: paramiko.SSHClient, repo_path: str, branch_name: str, commit_message: str) -> bool:
+        print(f"Remote commit in folder: {repo_path} (branch {branch_name})")
         escaped_path = repo_path.replace("'", "''")
 
-        clean_message = commit_message.strip().replace('\n', ' ').replace('\r',' ')
-        escaped_message = clean_message.replace('"', '\"')
-        
+        clean_message = commit_message.strip().replace("\n", " ").replace("\r", " ")
+        escaped_message = clean_message.replace("'", "''")
+
         powershell_command = (
-        f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-        f"\"Set-Location -Path '{escaped_path}'; "
-        f"git add --all; "
-        f"if (git status --porcelain) {{ git commit -m '{escaped_message}' }}; "
-        f"git push origin {branch_name}\""
+            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"Set-Location -Path '{escaped_path}'; "
+            f"git add --all; "
+            f"if (git status --porcelain) {{ git commit -m '{escaped_message}' }}\""
         )
-        
-        print(f"DEBUG: Executing command: {powershell_command}")
-    
+
+        print(f"DEBUG: Executing commit command: {powershell_command}")
+
         stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
-        
-        stderr_output = stderr.read().decode('utf-8').strip()
+        stdout.read()
+        stderr.read()
+        code = stdout.channel.recv_exit_status()
+        return code == 0
 
-        if (stderr_output) and (f'{branch_name} -> {branch_name}' in stderr_output) and ('To http' in stderr_output):
-            # print(f"Pushed and commit = {stderr_output}")
-            return True
+    def push_remote(self, ssh_client: paramiko.SSHClient, repo_path: str, branch_name: str) -> bool:
+        escaped_path = repo_path.replace("'", "''")
 
-        else:
-            print(f"probally failed: {stderr_output}")
+        powershell_command = (
+            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"Set-Location -Path '{escaped_path}'; git push origin {branch_name}\""
+        )
+
+        print(f"DEBUG: Executing push command: {powershell_command}")
+
+        stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        code = stdout.channel.recv_exit_status()
+        combined = f"{out}\n{err}".strip()
+        if code != 0:
+            print(f"push_remote failed (exit {code}): {combined}")
             return False
-        
-        print(f"Please check if successed. - output is empty")
         return True
 
     def repoWarningPopup(self, repoPaths):
@@ -1474,305 +2180,602 @@ class LabSyncDashBoard(ctk.CTk):
 
 
         fixIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"fixIcon.png")), size=(60,60))
-        fixBtn = ctk.CTkButton(repoWarningPopupToplevel, corner_radius=3, height=40, border_spacing=10, text="  Add More Path",fg_color="transparent", text_color=("gray10", "gray90"), command= repoWarningPopupToplevel.destroy , image=fixIcon ,hover_color=("gray70","gray30"), font=ctk.CTkFont(size=15, weight="bold"))
+        fixBtn = ctk.CTkButton(repoWarningPopupToplevel, corner_radius=3, height=40, border_spacing=10, text="  Add More Path",fg_color="transparent", text_color=("gray10", "gray90"), command= repoWarningPopupToplevel.destroy , image=fixIcon ,hover_color=("gray55","gray55"), font=ctk.CTkFont(size=15, weight="bold"))
 
 
         #Needs to show all unstaged files and select the diffs to commit
 
         
-    def gitShowUnstaggedFiles(self, diffsToAdd, errMsgLabel):
+    def gitShowUnstaggedFiles(self, diffsToAdd, errMsgLabel, on_result=None):
+        win = ctk.CTkToplevel(self)
+        win.geometry("760x700")
+        win.minsize(640, 500)
+        win.title("Commit Preview")
+        win.attributes("-topmost", True)
+        win.after(100, win.lift)
+        win.after(100, win.focus_set)
+        win.grab_set()
+        win.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._finish_commit_confirm_dialog(win, on_result, False),
+        )
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
 
-        repoWarningPopupToplevel = ctk.CTkToplevel(self)
-        repoWarningPopupToplevel.geometry("600x800")
-        repoWarningPopupToplevel.title("Unstaged Files")
-        repoWarningPopupToplevel.attributes("-topmost", True)
-        repoWarningPopupToplevel.after(100, repoWarningPopupToplevel.lift)
-        repoWarningPopupToplevel.after(100, repoWarningPopupToplevel.focus_set)
+        # Header
+        hdr = ctk.CTkFrame(win, fg_color=("#1d4ed8", "#1d4ed8"), corner_radius=14, height=64)
+        hdr.pack(fill="x", padx=14, pady=(14, 0))
+        hdr.pack_propagate(False)
+        hdr_inner = ctk.CTkFrame(hdr, fg_color="transparent")
+        hdr_inner.pack(fill="both", expand=True, padx=18, pady=10)
+        ctk.CTkLabel(
+            hdr_inner,
+            text="Commit Preview",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color="white",
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr_inner,
+            text="Review changed files before commit and push",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#bfdbfe",
+            anchor="w",
+        ).pack(anchor="w")
 
-        repoWarningPopupToplevel.grab_set()
+        legend = ctk.CTkFrame(win, fg_color="transparent")
+        legend.pack(fill="x", padx=18, pady=(10, 2))
+        type_colors = {"New": "#16a34a", "Modified": "#d97706", "Deleted": "#dc2626", "Untracked (New)": "#2563eb"}
+        for label, color in type_colors.items():
+            ctk.CTkLabel(
+                legend,
+                text=f"  {label}  ",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color="white",
+                fg_color=color,
+                corner_radius=6,
+            ).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(
+            legend,
+            text=f"  {len(diffsToAdd)} file(s) to commit",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=("gray40", "gray65"),
+        ).pack(side="left")
 
-        repoWarningPopupToplevel.grid_rowconfigure(0,weight=1)
-        repoWarningPopupToplevel.grid_rowconfigure(1,weight=1)
-        repoWarningPopupToplevel.grid_rowconfigure(2,weight=1)
-        repoWarningPopupToplevel.grid_rowconfigure(3,weight=1)
-        repoWarningPopupToplevel.grid_columnconfigure(0, weight=1)
+        table_outer = ctk.CTkFrame(
+            win,
+            corner_radius=12,
+            fg_color=("gray92", "gray18"),
+            border_width=1,
+            border_color=("gray82", "gray30"),
+        )
+        table_outer.pack(fill="both", expand=True, padx=14, pady=(6, 6))
+        table = ctk.CTkScrollableFrame(table_outer, fg_color="transparent")
+        table.grid_columnconfigure(0, weight=1)
+        table.pack(fill="both", expand=True, padx=6, pady=6)
 
+        sorted_items = sorted(diffsToAdd.items(), key=lambda item: item[1].get("file", ""))
+        for idx, (_fileName, fileDict) in enumerate(sorted_items):
+            status = fileDict.get("type", "Unknown")
+            color = type_colors.get(status, "gray")
+            row_f = ctk.CTkFrame(table, fg_color=("gray96", "gray22"), corner_radius=8)
+            row_f.grid_columnconfigure(1, weight=1)
+            row_f.grid(row=idx, column=0, padx=4, pady=3, sticky="ew")
+            ctk.CTkLabel(
+                row_f,
+                text=f" {status} ",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color="white",
+                fg_color=color,
+                corner_radius=5,
+                width=108,
+            ).grid(row=0, column=0, padx=(8, 10), pady=6, sticky="w")
+            ctk.CTkLabel(
+                row_f,
+                text=fileDict.get("file", ""),
+                font=ctk.CTkFont(family="Consolas", size=12),
+                text_color=("gray10", "gray88"),
+                anchor="w",
+                wraplength=560,
+                justify="left",
+            ).grid(row=0, column=1, padx=4, pady=6, sticky="ew")
 
-        repolabelwarning = ctk.CTkLabel(repoWarningPopupToplevel, text="Please make sure you want to commit this files before you continue:\n Note - You can see up to 100 files.")
-        repolabelwarning.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-        
-        
-        #Table:
-        diffFilesTable = ctk.CTkScrollableFrame(repoWarningPopupToplevel)
-        diffFilesTable.grid_columnconfigure(0, weight=1)
+        info_lbl = ctk.CTkLabel(
+            win,
+            text="Confirm to commit these files and push to remote.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=("gray35", "gray70"),
+        )
+        info_lbl.pack(fill="x", padx=16, pady=(0, 6))
 
-        for count, (fileName, fileDict) in enumerate(diffsToAdd.items()):
-            text_label = f"{count}: {fileDict['file']}, with Status: {fileDict['type']}"
-            addThisText = ctk.CTkLabel(diffFilesTable, text= text_label, wraplength=700)
-            addThisText.grid(row=count, column=0, padx=10, pady=10, sticky="news")
-        diffFilesTable.grid(row=1, column=0, padx=10, pady=10, sticky="news")
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.grid_columnconfigure(0, weight=1)
+        btn_row.grid_columnconfigure(1, weight=1)
+        btn_row.pack(fill="x", padx=14, pady=(0, 14))
 
-        repolabelwarningSecond = ctk.CTkLabel(repoWarningPopupToplevel, text=" Please confirm to commit & Push.")
-        repolabelwarningSecond.grid(row=2, column=0, padx=10, pady=10, sticky="news")
+        cancel_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "CancelBtn.png")), size=(26, 26))
+        ctk.CTkButton(
+            btn_row,
+            text="Cancel",
+            image=cancel_icon,
+            compound="left",
+            corner_radius=10,
+            height=42,
+            fg_color=("gray88", "gray30"),
+            text_color=("gray20", "gray90"),
+            hover_color=("gray75", "gray40"),
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            command=lambda: self._finish_commit_confirm_dialog(win, on_result, False),
+        ).grid(row=0, column=0, padx=(0, 6), pady=4, sticky="ew")
 
-        btnRowFrame = ctk.CTkFrame(repoWarningPopupToplevel)
-        btnRowFrame.grid_rowconfigure(1,weight=0)
-        btnRowFrame.grid_columnconfigure(0, weight=1)
-        btnRowFrame.grid_columnconfigure(1, weight=1)
-        btnRowFrame.grid(row=3, column=0, padx=10, pady=10, sticky="news")
+        ctk.CTkButton(
+            btn_row,
+            text="Confirm commit & push",
+            image=self.push_n_commit_icon,
+            compound="left",
+            corner_radius=10,
+            height=42,
+            fg_color=("#2563eb", "#3b82f6"),
+            text_color=("white", "white"),
+            hover_color=("#1d4ed8", "#2563eb"),
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            command=lambda: self._finish_commit_confirm_dialog(win, on_result, True),
+        ).grid(row=0, column=1, padx=(6, 0), pady=4, sticky="ew")
 
-        CancelIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "CancelBtn.png")), size=(30,30))
-        CancelBtn = ctk.CTkButton(btnRowFrame, corner_radius=3, height=40, border_spacing=10, compound="top", text="  Cancel", fg_color="transparent", text_color=("gray10", "gray90"), command=repoWarningPopupToplevel.destroy , image=CancelIcon, hover_color=("gray70","gray30"), anchor="center", font=ctk.CTkFont(size=15, weight="bold"), )
-        CancelBtn.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-
-        # push_n_commit_icon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, "LightMode_PushnCommit.png")), dark_image=Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
-        push_n_commit_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(40,40))
-        Push_n_Commit_Btn = ctk.CTkButton(btnRowFrame, corner_radius=5,  border_spacing=10, compound="top", text="Push & Commit", fg_color="gray75", command=lambda x=repoWarningPopupToplevel, y= errMsgLabel : self.confirmTheCommit(x,y)  , image=self.push_n_commit_icon , anchor="center", border_color="black", hover_color=("gray85","gray45"), font=ctk.CTkFont(weight="bold"), text_color=("#5C6D78","#424242"))
-        Push_n_Commit_Btn.grid(row=0, column=1, padx=10, pady=10, sticky="news")
-
-        return repoWarningPopupToplevel
-
-    def confirmTheCommit(self, repoWarningPopupToplevel, errMsgLabel):
-        errMsgLabel.configure(text="Pushing & Commit Please wait")
-        print("Pushing & Commit Please wait")
-        self.WantToContinue = True
-        repoWarningPopupToplevel.destroy()
+        return win
             
 
-        
 
+    def showFolderDiffPopup(self, folder_diffs, errMsgLabel, on_result=None):
+        """Show a diff popup comparing source vs destination before copy."""
+        win = ctk.CTkToplevel(self)
+        win.geometry("760x680")
+        win.minsize(640, 480)
+        win.title("Folder Diff — confirm copy")
+        win.attributes("-topmost", True)
+        win.after(100, win.lift)
+        win.after(100, win.focus_set)
+        win.grab_set()
+        win.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._finish_commit_confirm_dialog(win, on_result, False),
+        )
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
 
+        # ── header ──────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(win, fg_color=("#1d4ed8", "#1d4ed8"), corner_radius=14, height=64)
+        hdr.pack(fill="x", padx=14, pady=(14, 0))
+        hdr.pack_propagate(False)
+        hdr_inner = ctk.CTkFrame(hdr, fg_color="transparent")
+        hdr_inner.pack(fill="both", expand=True, padx=18, pady=10)
+        ctk.CTkLabel(
+            hdr_inner, text="Folder Diff",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color="white", anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            hdr_inner, text="Files that will change when copy runs",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#bfdbfe", anchor="w",
+        ).pack(anchor="w")
 
+        # ── legend ──────────────────────────────────────────────────────
+        legend = ctk.CTkFrame(win, fg_color="transparent")
+        legend.pack(fill="x", padx=18, pady=(10, 2))
+        TYPE_COLORS = {"New": "#16a34a", "Modified": "#d97706", "Deleted": "#dc2626"}
+        for label, color in TYPE_COLORS.items():
+            ctk.CTkLabel(
+                legend, text=f"  {label}  ",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color="white", fg_color=color, corner_radius=6,
+            ).pack(side="left", padx=(0, 8))
+        total = len(folder_diffs)
+        ctk.CTkLabel(
+            legend,
+            text=f"  {total} file(s) differ" if total else "  Source and destination are identical",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=("gray40", "gray65"),
+        ).pack(side="left")
 
-        
+        # ── scrollable file list ─────────────────────────────────────────
+        table_outer = ctk.CTkFrame(
+            win, corner_radius=12, fg_color=("gray92", "gray18"),
+            border_width=1, border_color=("gray82", "gray30"),
+        )
+        table_outer.pack(fill="both", expand=True, padx=14, pady=(6, 6))
+        table = ctk.CTkScrollableFrame(table_outer, fg_color="transparent")
+        table.grid_columnconfigure(0, weight=1)
+        table.pack(fill="both", expand=True, padx=6, pady=6)
 
+        if not folder_diffs:
+            ctk.CTkLabel(
+                table,
+                text="No differences found — nothing will change.",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color=("gray40", "gray65"),
+            ).grid(row=0, column=0, padx=12, pady=24, sticky="w")
+        else:
+            for idx, (key, info) in enumerate(sorted(folder_diffs.items())):
+                status = info["type"]
+                color = TYPE_COLORS.get(status, "gray")
+                row_f = ctk.CTkFrame(
+                    table, fg_color=("gray96", "gray22"), corner_radius=8,
+                )
+                row_f.grid_columnconfigure(1, weight=1)
+                row_f.grid(row=idx, column=0, padx=4, pady=3, sticky="ew")
+                ctk.CTkLabel(
+                    row_f, text=f" {status} ",
+                    font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                    text_color="white", fg_color=color,
+                    corner_radius=5, width=72,
+                ).grid(row=0, column=0, padx=(8, 10), pady=6, sticky="w")
+                ctk.CTkLabel(
+                    row_f, text=info["file"],
+                    font=ctk.CTkFont(family="Consolas", size=12),
+                    text_color=("gray10", "gray88"),
+                    anchor="w", wraplength=560, justify="left",
+                ).grid(row=0, column=1, padx=4, pady=6, sticky="ew")
 
+        # ── buttons ─────────────────────────────────────────────────────
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.grid_columnconfigure(0, weight=1)
+        btn_row.grid_columnconfigure(1, weight=1)
+        btn_row.pack(fill="x", padx=14, pady=(0, 14))
 
+        CancelIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "CancelBtn.png")), size=(26, 26))
+        ctk.CTkButton(
+            btn_row, text="Cancel", image=CancelIcon, compound="left",
+            corner_radius=10, height=42,
+            fg_color=("gray88", "gray30"), text_color=("gray20", "gray90"),
+            hover_color=("gray75", "gray40"),
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            command=lambda: self._finish_commit_confirm_dialog(win, on_result, False),
+        ).grid(row=0, column=0, padx=(0, 6), pady=4, sticky="ew")
 
+        copy_icon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_PushnCommit.png")), size=(26, 26))
+        ctk.CTkButton(
+            btn_row, text="Proceed with copy", image=copy_icon, compound="left",
+            corner_radius=10, height=42,
+            fg_color=("#2563eb", "#3b82f6"), text_color=("white", "white"),
+            hover_color=("#1d4ed8", "#2563eb"),
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            command=lambda: self._finish_commit_confirm_dialog(win, on_result, True),
+        ).grid(row=0, column=1, padx=(6, 0), pady=4, sticky="ew")
 
-
-
-
-
-
-
-        
+        return win
 
 
     def pc_settings_popUp(self, pc_obj, zone_obj):
-        
+
         popup = ctk.CTkToplevel(self)
-        popup.geometry("800x880")
-        popup.title(f"Manage {pc_obj.pc_name}")
+        popup.geometry("920x960")
+        popup.minsize(860, 720)
+        popup.title(f"Computer · {pc_obj.pc_name}")
+        popup.configure(fg_color=("gray92", "gray14"))
         popup.attributes("-topmost", True)
         popup.after(100, popup.lift)
         popup.after(100, popup.focus_set)
-
         popup.grab_set()
 
+        popup.grid_columnconfigure(0, weight=1)
+        popup.grid_rowconfigure(2, weight=1)
 
-        popup.grid_rowconfigure(0,weight=0)
-        popup.grid_rowconfigure(1,weight=0)
-        popup.grid_rowconfigure(2,weight=0)
-        popup.grid_rowconfigure(3,weight=0)
-        popup.grid_rowconfigure(4,weight=0)
-        popup.grid_rowconfigure(5,weight=0)
-        # popup.grid_rowconfigure(6,weight=0)
-        # popup.grid_rowconfigure(7,weight=0)
-        # popup.grid_rowconfigure(8,weight=0)
-        popup.grid_columnconfigure(0,weight=1)
-        popup.grid_columnconfigure(1,weight=1)
-        popup.grid_columnconfigure(2,weight=1)
-        popup.grid_columnconfigure(3,weight=1)
-        popup.grid_columnconfigure(4,weight=1)
-        popup.grid_columnconfigure(5,weight=1)
+        header = ctk.CTkFrame(popup, fg_color=("gray92", "gray14"))
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
 
-        # pcIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_pc.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(60,60))
-        pcIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_pc.png")), size=(60,60))
-        pcIconLabel = ctk.CTkLabel(popup, text="", compound="center", image=pcIcon)
-        pcIconLabel.grid(row=0, column=2, columnspan=2, padx=10, pady=10, sticky="news")
+        banner = ctk.CTkFrame(header, fg_color=("#1d4ed8", "#1d4ed8"), corner_radius=16, height=100)
+        banner.pack(fill="x", padx=18, pady=(18, 8))
+        banner.pack_propagate(False)
+        banner_inner = ctk.CTkFrame(banner, fg_color="transparent")
+        banner_inner.pack(fill="both", expand=True, padx=22, pady=14)
 
+        pcIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DarkMode_pc.png")), size=(52, 52))
+        top_row = ctk.CTkFrame(banner_inner, fg_color="transparent")
+        top_row.pack(fill="x")
+        ctk.CTkLabel(top_row, text="", image=pcIcon).pack(side="left", padx=(0, 14))
+        title_stack = ctk.CTkFrame(top_row, fg_color="transparent")
+        title_stack.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            title_stack,
+            text="Manage computer",
+            font=UI_FONT_TITLE,
+            text_color=("white", "white"),
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            title_stack,
+            text=f"{pc_obj.pc_name}  ·  Zone: {zone_obj.Zone_name}",
+            font=UI_FONT_SMALL,
+            text_color=("#bfdbfe", "#bfdbfe"),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(
+            banner_inner,
+            text=(
+                "Paths are used on the remote PC over SSH. Use Browse to pick a folder on this PC, "
+                "or paste a path (including UNC). Edit the value if the remote layout is different."
+            ),
+            font=UI_FONT_SMALL,
+            text_color=("#e0e7ff", "#e0e7ff"),
+            anchor="w",
+            wraplength=820,
+            justify="left",
+        ).pack(fill="x", pady=(10, 0))
 
-        pcnameRow = ctk.CTkFrame(popup)
-        pcnameRow.grid_rowconfigure(0,weight=1)
-        pcnameRow.grid_columnconfigure(0,weight=1)
-        
-        pcnamelabel = ctk.CTkLabel(pcnameRow, text="PC Name: ",font=ctk.CTkFont(size=17, weight="bold"))
-        pcnamelabel.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-        self.pcnameEntry = ctk.CTkEntry(pcnameRow, width=150)
+        conn_card = ctk.CTkFrame(
+            popup,
+            corner_radius=16,
+            fg_color=("gray98", "gray17"),
+            border_width=1,
+            border_color=("gray85", "gray32"),
+        )
+        conn_card.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
+        conn_card.grid_columnconfigure(1, weight=1)
         oldpcname = pc_obj.pc_name
+
+        def _conn_row(r, label_text, widget_factory):
+            ctk.CTkLabel(conn_card, text=label_text, font=UI_FONT_BODY_BOLD, anchor="w").grid(
+                row=r, column=0, padx=(16, 10), pady=8, sticky="w"
+            )
+            w = widget_factory()
+            w.grid(row=r, column=1, padx=(0, 16), pady=8, sticky="ew")
+            return w
+
+        self.pcnameEntry = _conn_row(
+            0,
+            "PC name",
+            lambda: ctk.CTkEntry(conn_card, font=UI_FONT_BODY, height=36, corner_radius=10),
+        )
         self.pcnameEntry.insert(0, oldpcname)
         self.pcnameEntry.configure(state="disabled")
-        self.pcnameEntry.grid(row=0, column=1, padx=10, pady=10, sticky="news")
 
-        pcnameRow.grid(row=1, column=2, columnspan=2, padx=10, pady=10, sticky="news")
-
-
-        hostnameRow = ctk.CTkFrame(popup)
-        hostnameRow.grid_rowconfigure(0,weight=1)
-        hostnameRow.grid_columnconfigure(0,weight=1)
-
-        hostnamelabel = ctk.CTkLabel(hostnameRow, text="HostName (or ip address): ",font=ctk.CTkFont(size=17, weight="bold"))
-        hostnamelabel.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-        self.hostnameEntry = ctk.CTkEntry(hostnameRow, width=150)
+        self.hostnameEntry = _conn_row(
+            1,
+            "Host / IP",
+            lambda: ctk.CTkEntry(conn_card, font=UI_FONT_BODY, height=36, corner_radius=10),
+        )
         self.hostnameEntry.insert(0, pc_obj.host_name)
         self.hostnameEntry.configure(state="disabled")
-        self.hostnameEntry.grid(row=0, column=1, padx=10, pady=10, sticky="news")
 
-        hostnameRow.grid(row=2, column=2, columnspan=2, padx=10, pady=10, sticky="news")
-
-        # self.user_name = user_name
-        user_nameRow = ctk.CTkFrame(popup)
-        user_nameRow.grid_rowconfigure(0,weight=1)
-        user_nameRow.grid_columnconfigure(0,weight=1)
-
-        user_namelabel = ctk.CTkLabel(user_nameRow, text="user_name (full with domain): ",font=ctk.CTkFont(size=17, weight="bold"))
-        user_namelabel.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-        self.user_nameEntry = ctk.CTkEntry(user_nameRow, width=150)
+        self.user_nameEntry = _conn_row(
+            2,
+            r"User (domain\user)",
+            lambda: ctk.CTkEntry(conn_card, font=UI_FONT_BODY, height=36, corner_radius=10),
+        )
         self.user_nameEntry.insert(0, pc_obj.user_name)
         self.user_nameEntry.configure(state="disabled")
-        self.user_nameEntry.grid(row=0, column=1, padx=10, pady=10, sticky="news")
 
-        user_nameRow.grid(row=3, column=2, columnspan=2, padx=10, pady=10, sticky="news")
-
-        # self.password = password
-        passwordRow = ctk.CTkFrame(popup)
-        passwordRow.grid_rowconfigure(0,weight=1)
-        passwordRow.grid_columnconfigure(0,weight=1)
-
-        passwordlabel = ctk.CTkLabel(passwordRow, text="password: ",font=ctk.CTkFont(size=17, weight="bold"))
-        passwordlabel.grid(row=0, column=0, padx=10, pady=10, sticky="news")
-        self.passwordEntry = ctk.CTkEntry(passwordRow, width=150)
+        self.passwordEntry = _conn_row(
+            3,
+            "Password",
+            lambda: ctk.CTkEntry(conn_card, font=UI_FONT_BODY, height=36, corner_radius=10, show="*"),
+        )
         self.passwordEntry.insert(0, pc_obj.password)
         self.passwordEntry.configure(state="disabled")
-        self.passwordEntry.grid(row=0, column=1, padx=10, pady=10, sticky="news")
 
-        passwordRow.grid(row=4, column=2, columnspan=2, padx=10, pady=10, sticky="news")
-        
-        #Frame for the path table:
-        pathfilesMainTableFrame = ctk.CTkFrame(popup, border_width=1, border_color=("black","white"))
-        pathfilesMainTableFrame.grid_rowconfigure(0,weight=1)
-        pathfilesMainTableFrame.grid_rowconfigure(1,weight=1)
-        pathfilesMainTableFrame.grid_rowconfigure(2,weight=1)
-        pathfilesMainTableFrame.grid_columnconfigure(0,weight=1)
-        pathfilesMainTableFrame.grid_columnconfigure(1,weight=1)
-        pathfilesMainTableFrame.grid_columnconfigure(2,weight=1)
+        path_card = ctk.CTkFrame(
+            popup,
+            corner_radius=16,
+            fg_color=("gray98", "gray17"),
+            border_width=1,
+            border_color=("gray85", "gray32"),
+        )
+        path_card.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 10))
+        path_card.grid_columnconfigure(0, weight=1)
+        path_card.grid_rowconfigure(3, weight=1)
 
-        #Title for table:
-        TitleTableRow = ctk.CTkFrame(pathfilesMainTableFrame)
-        TitleTableRow.grid_rowconfigure(0, weight=1)
-        TitleTableRow.grid_columnconfigure(0, weight=1)
-        TitleTableRow.grid_columnconfigure(1, weight=1)
-        TitleTableRow.grid_columnconfigure(2, weight=1)
-        TitleTableRow.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(path_card, text="Folder paths", font=UI_FONT_BODY_BOLD, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=16, pady=(14, 4)
+        )
+        ctk.CTkLabel(
+            path_card,
+            text="Source · Browse or paste  ·  File type (e.g. ALL, csv)  ·  Output / Git folder · Browse or paste",
+            font=UI_FONT_SMALL,
+            text_color=("gray40", "gray65"),
+            anchor="w",
+            wraplength=840,
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
 
-        inputLabel = ctk.CTkLabel(TitleTableRow, text="inputfolder",font=ctk.CTkFont(size=17, weight="bold"))
-        inputLabel.grid(row=0, column=0, padx=10, pady=10, sticky="nwes")
+        TitleTableRow = ctk.CTkFrame(path_card, fg_color="transparent")
+        TitleTableRow.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
+        for col, wt in ((0, 1), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0)):
+            TitleTableRow.grid_columnconfigure(col, weight=wt)
 
-        FileTypeLabel = ctk.CTkLabel(TitleTableRow, text="FileType",font=ctk.CTkFont(size=17, weight="bold"))
-        FileTypeLabel.grid(row=0, column=1, padx=10, pady=10, sticky="ns")
+        hdr = [
+            (0, "Source path"),
+            (1, ""),
+            (2, "Type"),
+            (3, "Output (Git)"),
+            (4, ""),
+            (5, ""),
+        ]
+        for col, txt in hdr:
+            ctk.CTkLabel(
+                TitleTableRow,
+                text=txt,
+                font=UI_FONT_SMALL,
+                text_color=("gray45", "gray60"),
+            ).grid(row=0, column=col, padx=4, pady=4, sticky="w")
 
-        OutoutDirLabel = ctk.CTkLabel(TitleTableRow, text="OutputDir",font=ctk.CTkFont(size=17, weight="bold"))
-        OutoutDirLabel.grid(row=0, column=2, padx=10, pady=10, sticky="news")
-
-        deletePathLabel = ctk.CTkLabel(TitleTableRow, text="Delete path",font=ctk.CTkFont(size=17, weight="bold"))
-        deletePathLabel.grid(row=0, column=3, padx=10, pady=10, sticky="news")
-
-        TitleTableRow.grid(row=0 , column=0, columnspan=4, padx=10, pady=10, sticky="news")
-
-        # self.pathFiles = pathFiles
-        self.intoTablePathFiles_frames = ctk.CTkScrollableFrame(pathfilesMainTableFrame, border_width=1, border_color=("black","white"))
-        self.intoTablePathFiles_frames.grid_rowconfigure(0,weight=1)
-        self.intoTablePathFiles_frames.grid_columnconfigure(0,weight=1)
-        self.intoTablePathFiles_frames.grid_columnconfigure(1,weight=1)
-        self.intoTablePathFiles_frames.grid_columnconfigure(2,weight=1)
-        self.intoTablePathFiles_frames.grid_columnconfigure(3,weight=1)
-
-        
-        
-
-        
+        self.intoTablePathFiles_frames = ctk.CTkScrollableFrame(
+            path_card,
+            corner_radius=12,
+            fg_color=("gray96", "gray15"),
+            border_width=1,
+            border_color=("gray82", "gray30"),
+            height=300,
+        )
+        self.intoTablePathFiles_frames.grid_columnconfigure(0, weight=1)
+        self.intoTablePathFiles_frames.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 10))
 
         self.filesPathCount = 1
         self.pathsElements = {}
         for path in pc_obj.pathFiles.values():
-
-            newPathRow = self.addingPathRowToTable(pathsElements= self.pathsElements, path=path)
-            for strKey, elem in self.pathsElements[newPathRow].items():
+            newPathRow = self.addingPathRowToTable(pathsElements=self.pathsElements, path=path)
+            for _k, elem in self.pathsElements[newPathRow].items():
                 elem.configure(state="disabled")
-            # self.pathsElements[newPathRow]['inputEntry'].configure(state="disabled")
-            # self.pathsElements[newPathRow]['FileTypeEntry'].configure(state="disabled")
-            # self.pathsElements[newPathRow]['OutputDirEntry'].configure(state="disabled")
-        
-        self.intoTablePathFiles_frames.grid(row=1, column=0, columnspan=3, padx=10, pady=10, sticky="news")
 
-        # self.addMorePathIcon = ctk.CTkImage(light_image=Image.open(os.path.join(images_folder_path, f"LightMode_AddObject.png")), dark_image=Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
-        self.addMorePathIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, f"DarkMode_AddObject.png")), size=(40,40))
-        self.addMorePathBtn = ctk.CTkButton(pathfilesMainTableFrame, corner_radius=3, height=40, border_spacing=10, text="  Add More Path",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=self.pathsElements : self.addingPathRowToTable(x) , image=self.addMorePathIcon ,hover_color=("gray70","gray30"), font=ctk.CTkFont(size=15, weight="bold"))
+        self.addMorePathIcon = ctk.CTkImage(
+            Image.open(os.path.join(images_folder_path, "DarkMode_AddObject.png")), size=(36, 36)
+        )
+        self.addMorePathBtn = ctk.CTkButton(
+            path_card,
+            corner_radius=12,
+            height=42,
+            border_spacing=10,
+            text="  Add path row",
+            fg_color=("gray88", "gray28"),
+            text_color=("gray15", "gray90"),
+            command=lambda x=self.pathsElements: self.addingPathRowToTable(x),
+            image=self.addMorePathIcon,
+            hover_color=("gray75", "gray38"),
+            font=UI_FONT_BODY_BOLD,
+        )
         self.addMorePathBtn.configure(state="disabled")
-        self.addMorePathBtn.grid(row=2, column=1, padx=10, pady=10, sticky="news")
-        
-        
-        pathfilesMainTableFrame.grid(row=5, column=1, columnspan=4, padx=10, pady=10, sticky="news")
+        self.addMorePathBtn.grid(row=4, column=0, padx=12, pady=(0, 14), sticky="w")
 
-        
-
-        self.PcBtnsRow = ctk.CTkFrame(popup)#, fg_color="transparent")
+        self.PcBtnsRow = ctk.CTkFrame(popup, fg_color="transparent")
         self.PcBtnsRow.grid_rowconfigure(0, weight=1)
-        self.PcBtnsRow.grid_columnconfigure(0, weight=1)
-        self.PcBtnsRow.grid_columnconfigure(1, weight=1)
+        for c in (0, 1, 2):
+            self.PcBtnsRow.grid_columnconfigure(c, weight=0)
 
-        self.savePcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "SaveBtn.png")), size=(30,30))
-        self.savePcInformationBtn = ctk.CTkButton(self.PcBtnsRow, corner_radius=3, height=40, border_spacing=10, text="  Save",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=pc_obj, y=popup, z=zone_obj, w= self.pathsElements, t=oldpcname : self.HandleWithSavePcBtn(x,y,z,w,t) , image=self.savePcInformationIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
-        self.savePcInformationBtn.grid(row=0, column=1, padx=10, pady=10, sticky="news")
+        self.savePcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "SaveBtn.png")), size=(28, 28))
+        self.savePcInformationBtn = ctk.CTkButton(
+            self.PcBtnsRow,
+            corner_radius=12,
+            height=44,
+            border_spacing=10,
+            text="Save",
+            fg_color=("#16a34a", "#22c55e"),
+            text_color=("white", "white"),
+            command=lambda x=pc_obj, y=popup, z=zone_obj, w=self.pathsElements, t=oldpcname: self.HandleWithSavePcBtn(
+                x, y, z, w, t
+            ),
+            image=self.savePcInformationIcon,
+            hover_color=("#15803d", "#16a34a"),
+            font=UI_FONT_BODY_BOLD,
+        )
+        self.savePcInformationBtn.grid(row=0, column=2, padx=8, pady=16, sticky="e")
 
-        self.EditPcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "EditBtn.png")), size=(30,30))
-        self.EditPcInformationBtn = ctk.CTkButton(self.PcBtnsRow, corner_radius=3, height=40, border_spacing=10, text="  Edit",fg_color="transparent", text_color=("gray10", "gray90"), command=lambda x=self.pathsElements : self.HandleWithEditBtn(x) , image=self.EditPcInformationIcon ,hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
-        self.EditPcInformationBtn.grid(row=0, column=0, padx=10, pady=10, sticky="news")
+        self.EditPcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "EditBtn.png")), size=(28, 28))
+        self.EditPcInformationBtn = ctk.CTkButton(
+            self.PcBtnsRow,
+            corner_radius=12,
+            height=44,
+            border_spacing=10,
+            text="Edit",
+            fg_color=("#2563eb", "#3b82f6"),
+            text_color=("white", "white"),
+            command=lambda x=self.pathsElements: self.HandleWithEditBtn(x),
+            image=self.EditPcInformationIcon,
+            hover_color=("#1d4ed8", "#2563eb"),
+            font=UI_FONT_BODY_BOLD,
+        )
+        self.EditPcInformationBtn.grid(row=0, column=1, padx=8, pady=16, sticky="e")
 
-        self.CancelPcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "CancelBtn.png")), size=(30,30))
-        self.CancelPcInformationBtn = ctk.CTkButton(self.PcBtnsRow, corner_radius=3, height=40, border_spacing=10, text="  Cancel", fg_color="transparent", text_color=("gray10", "gray90"), command=popup.destroy , image=self.CancelPcInformationIcon, hover_color=("gray70","gray30"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"), )
-        # self.CancelPcInformationBtn.grid(row=0, column=0, padx=0, pady=0, sticky="news")
+        self.CancelPcInformationIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "CancelBtn.png")), size=(28, 28))
+        self.CancelPcInformationBtn = ctk.CTkButton(
+            self.PcBtnsRow,
+            corner_radius=12,
+            height=44,
+            border_spacing=10,
+            text="Cancel",
+            fg_color=("gray88", "gray30"),
+            text_color=("gray20", "gray90"),
+            command=popup.destroy,
+            image=self.CancelPcInformationIcon,
+            hover_color=("gray75", "gray40"),
+            font=UI_FONT_BODY_BOLD,
+        )
 
-        self.PcBtnsRow.grid(row=6, column=2, columnspan=2, padx=10, pady=10, sticky="news")
+        self.PcBtnsRow.grid(row=3, column=0, sticky="e", padx=18, pady=(0, 18))
 
+    def addingPathRowToTable(self, pathsElements, path=None):
+        if path is None:
+            path = {"inputfolder": "Empty", "FileType": "ALL", "OutputDir": "Empty"}
 
-
-    def addingPathRowToTable(self,pathsElements, path={"inputfolder": "Empty", "FileType": "ALL", "OutputDir": "Empty",}):
-
-        PathRow = ctk.CTkFrame(self.intoTablePathFiles_frames, border_width=1, border_color=("black","white"))
+        PathRow = ctk.CTkFrame(
+            self.intoTablePathFiles_frames,
+            corner_radius=12,
+            fg_color=("gray94", "gray20"),
+            border_width=1,
+            border_color=("gray82", "gray32"),
+        )
         PathRow.grid_rowconfigure(0, weight=1)
-        PathRow.grid_columnconfigure(0, weight=1)
-        PathRow.grid_columnconfigure(1, weight=1)
-        PathRow.grid_columnconfigure(2, weight=1)
-        PathRow.grid_columnconfigure(3, weight=1)
+        for col, wt in ((0, 1), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0)):
+            PathRow.grid_columnconfigure(col, weight=wt)
 
-        inputEntry = ctk.CTkEntry(PathRow, width=200)
+        inputEntry = ctk.CTkEntry(
+            PathRow,
+            font=UI_FONT_BODY,
+            height=34,
+            corner_radius=10,
+            placeholder_text="Paste or Browse…",
+        )
         inputEntry.insert(0, path["inputfolder"])
-        inputEntry.grid(row=0, column=0, padx=10, pady=10, sticky="nws")
-        # inputTextBox.configure(state="disabled")
+        inputEntry.grid(row=0, column=0, padx=(8, 4), pady=10, sticky="ew")
 
-        FileTypeEntry = ctk.CTkEntry(PathRow, width=50)
+        inputBrowseBtn = self._make_path_browse_button(
+            PathRow, inputEntry, "Select source folder"
+        )
+        inputBrowseBtn.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="ew")
+
+        FileTypeEntry = ctk.CTkEntry(
+            PathRow,
+            width=80,
+            font=UI_FONT_BODY,
+            height=34,
+            corner_radius=10,
+            placeholder_text="ALL",
+        )
         FileTypeEntry.insert(0, path["FileType"])
-        FileTypeEntry.grid(row=0, column=1, padx=10, pady=10, sticky="nws")
-        # FileTypeTextBox.configure(state="disabled")
+        FileTypeEntry.grid(row=0, column=2, padx=4, pady=10, sticky="ew")
 
-        OutputDirEntry = ctk.CTkEntry(PathRow, width=200)
+        OutputDirEntry = ctk.CTkEntry(
+            PathRow,
+            font=UI_FONT_BODY,
+            height=34,
+            corner_radius=10,
+            placeholder_text="Git / output folder",
+        )
         OutputDirEntry.insert(0, path["OutputDir"])
-        OutputDirEntry.grid(row=0, column=2, padx=10, pady=10, sticky="nes")
-        # OutputDirTextBox.configure(state="disabled")
+        OutputDirEntry.grid(row=0, column=3, padx=(8, 4), pady=10, sticky="ew")
 
-        deletePathRowImage = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(30,30))
-        deletePathRowBtn = ctk.CTkButton(PathRow, corner_radius=5, width=60, height=40, border_spacing=10, text="",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=pathsElements, y=PathRow : self.deleteRowFromTable(x,y) , image=deletePathRowImage ,hover_color=("gray70","gray30"), anchor="nesw", font=ctk.CTkFont(size=15, weight="bold"))
-        deletePathRowBtn.grid(row=0, column=3, padx=10, pady=10, sticky="news")
+        outputBrowseBtn = self._make_path_browse_button(
+            PathRow, OutputDirEntry, "Select output (Git) folder"
+        )
+        outputBrowseBtn.grid(row=0, column=4, padx=(0, 4), pady=10, sticky="ew")
 
-        pathsElements[PathRow] = {  'inputEntry'    :   inputEntry,
-                                    'FileTypeEntry' :   FileTypeEntry,
-                                    'OutputDirEntry':   OutputDirEntry,
-                                    'deletePathRowBtn': deletePathRowBtn}
+        deletePathRowImage = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(28, 28))
+        deletePathRowBtn = ctk.CTkButton(
+            PathRow,
+            corner_radius=10,
+            width=44,
+            height=34,
+            border_spacing=6,
+            text="",
+            fg_color=("gray88", "gray30"),
+            text_color=("gray15", "gray90"),
+            command=lambda x=pathsElements, y=PathRow: self.deleteRowFromTable(x, y),
+            image=deletePathRowImage,
+            hover_color=("#b91c1c", "#dc2626"),
+            anchor="center",
+        )
+        deletePathRowBtn.grid(row=0, column=5, padx=8, pady=10, sticky="e")
 
-        PathRow.grid(row= self.filesPathCount , column=0, columnspan=3, padx=10, pady=10, sticky="news")
-        self.filesPathCount += 1        
+        pathsElements[PathRow] = {
+            "inputEntry": inputEntry,
+            "inputBrowseBtn": inputBrowseBtn,
+            "FileTypeEntry": FileTypeEntry,
+            "OutputDirEntry": OutputDirEntry,
+            "outputBrowseBtn": outputBrowseBtn,
+            "deletePathRowBtn": deletePathRowBtn,
+        }
+
+        PathRow.grid(row=self.filesPathCount, column=0, sticky="ew", padx=4, pady=6)
+        self.filesPathCount += 1
         return PathRow
 
     def deleteRowFromTable(self, pathElements, pathToDelete):
@@ -1852,6 +2855,13 @@ class LabSyncDashBoard(ctk.CTk):
             
     #     return None
     
+    def saltThePassword(self, password):
+        salt = "EinavsAPP"
+        new_pass = password + salt
+        hashOBJ = hashlib.sha256()
+        hashOBJ.update(new_pass.encode('utf-8'))
+        return hashOBJ.hexdigest()
+
 
     def find_nearest_git_root_remote(self, ssh_client, path):
         print(f"DEBUG: Finding Git root for: {path}")
@@ -1863,8 +2873,8 @@ class LabSyncDashBoard(ctk.CTk):
         )
         
         stdin, stdout, stderr = ssh_client.exec_command(command)
-        out = stdout.read().decode('utf-8').strip()
-        err = stderr.read().decode('utf-8').strip()
+        out = stdout.read().decode('utf-8', errors='replace').strip()
+        err = stderr.read().decode('utf-8', errors='replace').strip()
         
         if out:
             fixed_path = out.replace("/", "\\")
@@ -1873,7 +2883,53 @@ class LabSyncDashBoard(ctk.CTk):
             
         print(f"DEBUG: No Git root found. Error: {err}")
         return None
-        
+
+    def check_destination_git_before_sync_remote(self, ssh_client, output_dir: str):
+        """
+        Before fetch/pull: ensure the destination path exists, lies inside a Git work tree,
+        and the repository root has a .git entry (directory or gitfile).
+
+        Returns (repo_root: str | None, error_message: str | None).
+        """
+        ps_folder = output_dir.replace("/", "\\").rstrip("\\").replace("'", "''")
+
+        exists_cmd = (
+            f"powershell.exe -NoProfile -Command "
+            f"\"if (Test-Path -LiteralPath '{ps_folder}') {{ '1' }} else {{ '0' }}\""
+        )
+        stdin, stdout, stderr = ssh_client.exec_command(exists_cmd)
+        if stdout.read().decode("utf-8", errors="replace").strip() != "1":
+            return None, f"Destination folder does not exist on the remote PC: {output_dir}"
+
+        inside_cmd = (
+            f"powershell.exe -NoProfile -Command "
+            f"\"Set-Location -LiteralPath '{ps_folder}'; "
+            f"git rev-parse --is-inside-work-tree 2>$null\""
+        )
+        stdin, stdout, stderr = ssh_client.exec_command(inside_cmd)
+        inside = stdout.read().decode("utf-8", errors="replace").strip().lower()
+        if inside != "true":
+            return None, (
+                f"Destination is not inside a Git repository. "
+                f"Pick an output folder under a cloned repo (.git). Path: {output_dir}"
+            )
+
+        repo_root = self.find_nearest_git_root_remote(ssh_client, output_dir)
+        if not repo_root:
+            return None, f"Could not resolve Git repository root for destination: {output_dir}"
+
+        escaped_root = repo_root.rstrip("\\").replace("'", "''")
+        gitmeta_cmd = (
+            f"powershell.exe -NoProfile -Command "
+            f"\"if (Test-Path -LiteralPath '{escaped_root}\\.git') {{ '1' }} else {{ '0' }}\""
+        )
+        stdin, stdout, stderr = ssh_client.exec_command(gitmeta_cmd)
+        if stdout.read().decode("utf-8", errors="replace").strip() != "1":
+            return None, (
+                f"No .git metadata at repository root (invalid or incomplete repo): {repo_root}"
+            )
+
+        return repo_root, None
 
     # def find_nearest_git_root_remote(self, ssh_client: paramiko.SSHClient, path):
     #     curr_path = path
@@ -1978,7 +3034,129 @@ class LabSyncDashBoard(ctk.CTk):
         print(f"DEBUG: Count result: '{out}'")
         
         return int(out) if out.isdigit() else 0
-        
+
+    def compare_folders_remote(self, ssh_client, source_folder, dest_folder, file_type="ALL"):
+        """Compare source vs destination on the remote PC.
+        Returns {relative_path: {'file': relative_path, 'type': 'New'|'Modified'|'Deleted'}}.
+        'New'      – exists in source, not in dest.
+        'Modified' – exists in both but different file size.
+        'Deleted'  – exists in dest but not in source (will be removed by diff apply step).
+        """
+        src = source_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
+        dst = dest_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
+        filter_str = "*" if file_type.upper() == "ALL" else f"*.{file_type.lstrip('.')}"
+
+        def _list_files(folder_escaped):
+            cmd = (
+                f"powershell.exe -NoProfile -Command "
+                f"\"Get-ChildItem -Path '{folder_escaped}' -Filter '{filter_str}' "
+                f"-File -Recurse -ErrorAction SilentlyContinue "
+                f"| ForEach-Object {{ "
+                f"  $rel = $_.FullName.Substring('{folder_escaped}'.Length).TrimStart('\\\\'); "
+                f"  $rel + '|' + $_.Length "
+                f"}}\""
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            raw = stdout.read().decode('utf-8', errors='replace').strip()
+            result = {}
+            for line in raw.splitlines():
+                line = line.strip()
+                if '|' in line:
+                    parts = line.rsplit('|', 1)
+                    rel = parts[0].strip()
+                    size = parts[1].strip() if len(parts) > 1 else '0'
+                    if rel:
+                        result[rel] = size
+            return result
+
+        src_files = _list_files(src)
+        dst_files = _list_files(dst)
+
+        diffs = {}
+        for rel, size in src_files.items():
+            if rel not in dst_files:
+                diffs[rel] = {'file': rel, 'type': 'New'}
+            elif size != dst_files[rel]:
+                diffs[rel] = {'file': rel, 'type': 'Modified'}
+        for rel in dst_files:
+            if rel not in src_files:
+                diffs[rel] = {'file': rel, 'type': 'Deleted'}
+        return diffs
+
+    def apply_folder_diffs_remote(self, ssh_client, source_folder, destination_folder, diffs, batch_size=100):
+        """Apply New/Modified/Deleted operations based on compare_folders_remote output, batching to avoid command line length limits."""
+        src = source_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
+        dst = destination_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
+
+        copy_list = []
+        delete_list = []
+        for rel_path, info in diffs.items():
+            status = str(info.get("type", "")).strip().lower()
+            if status in ("new", "modified"):
+                copy_list.append(rel_path)
+            elif status == "deleted":
+                delete_list.append(rel_path)
+
+        def _to_ps_array(values):
+            if len(values) == 0:
+                return "@()"
+            escaped = ["'" + str(v).replace("'", "''") + "'" for v in values]
+            return "@(" + ",".join(escaped) + ")"
+
+        total_copied = 0
+        total_deleted = 0
+
+        # Helper to run a batch of copy/delete
+        def run_batch(copy_batch, delete_batch):
+            copy_arr = _to_ps_array(copy_batch)
+            delete_arr = _to_ps_array(delete_batch)
+            powershell_command = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                f"\"$src='{src}'; $dst='{dst}'; "
+                f"$copyList={copy_arr}; $deleteList={delete_arr}; "
+                f"$copied=0; $deleted=0; "
+                f"foreach ($rel in $deleteList) {{ "
+                f"  $target = Join-Path $dst $rel; "
+                f"  if (Test-Path -LiteralPath $target) {{ Remove-Item -LiteralPath $target -Force; $deleted++ }} "
+                f"}}; "
+                f"foreach ($rel in $copyList) {{ "
+                f"  $srcFile = Join-Path $src $rel; "
+                f"  if (Test-Path -LiteralPath $srcFile) {{ "
+                f"    $dstFile = Join-Path $dst $rel; "
+                f"    $dstDir = Split-Path -Path $dstFile -Parent; "
+                f"    if ($dstDir -and -not (Test-Path -LiteralPath $dstDir)) {{ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }}; "
+                f"    Copy-Item -LiteralPath $srcFile -Destination $dstFile -Force; $copied++ "
+                f"  }} "
+                f"}}; "
+                f"Write-Output ('COPIED=' + $copied + ';DELETED=' + $deleted)\""
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
+            out = stdout.read().decode("utf-8", errors="replace").strip()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            code = stdout.channel.recv_exit_status()
+            if code != 0:
+                raise Exception(f"Apply folder diffs failed (exit {code}): {err or out}")
+            copied = 0
+            deleted = 0
+            m = re.search(r"COPIED=(\\d+);DELETED=(\\d+)", out)
+            if m:
+                copied = int(m.group(1))
+                deleted = int(m.group(2))
+            return copied, deleted
+
+        # Process deletes in batches
+        for i in range(0, len(delete_list), batch_size):
+            batch = delete_list[i:i+batch_size]
+            c, d = run_batch([], batch)
+            total_deleted += d
+
+        # Process copies in batches
+        for i in range(0, len(copy_list), batch_size):
+            batch = copy_list[i:i+batch_size]
+            c, d = run_batch(batch, [])
+            total_copied += c
+
+        return total_copied + total_deleted
 
     def create_ssh_connection(self, ip_address, username, password):
         ssh_client = paramiko.SSHClient()
@@ -2069,6 +3247,20 @@ class LabSyncDashBoard(ctk.CTk):
     #     return files_to_copy_count
 
 
+    def clear_remote_folder(self, ssh_client, folder_path):
+        print(f"DEBUG: Clearing remote folder: {folder_path}")
+        escaped_path = folder_path.replace("/", "\\").rstrip("\\").replace("'", "''")
+        command = (
+            f"powershell.exe -NoProfile -Command "
+            f"\"if (Test-Path '{escaped_path}') {{ Get-ChildItem -Path '{escaped_path}' | Remove-Item -Recurse -Force }}\""
+        )
+        try:
+            stdin, stdout, stderr = ssh_client.exec_command(command)
+            stdout.read() # המתנה לסיום הפעולה
+        except Exception as e:
+            print(f"DEBUG: Failed to clear folder {folder_path}: {e}")
+
+
 
     def copy_files_by_type(self, ssh_client, source_folder, destination_folder, file_type="ALL"):
         print(f"DEBUG: Copying files via CMD from {source_folder} to {destination_folder}")
@@ -2081,7 +3273,14 @@ class LabSyncDashBoard(ctk.CTk):
         print(f"DEBUG: Executing CMD: {command}")
         
         stdin, stdout, stderr = ssh_client.exec_command(command)
-        output = stdout.read().decode('utf-8').splitlines()
+
+        try:
+            raw_output = stdout.read()
+            # מנסים לפענח כ-utf-8, אם נכשל עוברים ל-cp1252 (סטנדרטי ל-Windows)
+            output = raw_output.decode('utf-8', errors='replace').splitlines()
+        except Exception as e:
+            print(f"Decoding error: {e}")
+            return 0
         
         for line in reversed(output):
             line = line.strip()
@@ -2135,13 +3334,6 @@ class LabSyncDashBoard(ctk.CTk):
             zonecount+=1
 
     
-        
-        
-
-    
-
-
-      
 
 if __name__ == "__main__":
     
@@ -2161,7 +3353,3 @@ if __name__ == "__main__":
         if WorkSpace_dict is not None:
             app = LabSyncDashBoard()
             app.mainloop()
-            
-
-
-

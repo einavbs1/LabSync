@@ -1070,23 +1070,16 @@ class LabSyncDashBoard(ctk.CTk):
         self.block_dropdown.grid(row=1, column=2, padx=12, pady=(4, 6), sticky="w")
         self.block_dropdown.set("")
 
-        # Checkbox for "Not using this parameter"
+        # Checkbox for "Disable Block Selection (Not Updating Block in Git)"
         self.not_using_param_checkbox = ctk.CTkCheckBox(
             self.git_Frame,
-            text="Not using this parameter",
+            text="Disable Block Selection",
             font=UI_FONT_BODY,
             checkbox_width=20,
             checkbox_height=20,
+            command=self._handle_not_using_param_checkbox
         )
         self.not_using_param_checkbox.grid(row=1, column=3, columnspan=2, padx=12, pady=(4, 6), sticky="w")
-
-        self.git_title_Label = ctk.CTkLabel(
-            self.git_Frame,
-            text="Commit message",
-            font=UI_FONT_BODY_BOLD,
-            text_color=("gray20", "gray90"),
-        )
-        self.git_title_Label.grid(row=2, column=1, columnspan=4, padx=12, pady=(4, 6), sticky="w")
 
         self.git_comment_Textbox = ctk.CTkTextbox(
             self.git_Frame,
@@ -1149,6 +1142,21 @@ class LabSyncDashBoard(ctk.CTk):
         self.EditZoneBtn.grid(row=0, column=0, sticky="news")
         
         print(f"Entered Zone: {zone_obj.Zone_name}. ")
+
+
+    def _handle_not_using_param_checkbox(self):
+        if self.not_using_param_checkbox.get():
+            dialog = CTkInputDialog(text="Enter password to confirm that you not updating params in block:", title="Authentication Required")
+            password = dialog.get_input()
+            if password == unlockPassword:
+                self.not_using_param_checkbox.select()
+                self.block_dropdown.configure(state="disabled")
+            else:
+                self.not_using_param_checkbox.deselect()
+                self.block_dropdown.configure(state="readonly")
+                self._show_topmost_warning("Access denied", "Wrong password.")
+        else:
+            self.block_dropdown.configure(state="readonly")
 
 
 
@@ -1468,27 +1476,15 @@ class LabSyncDashBoard(ctk.CTk):
             self.git_progressbar.set(1.0)
             currstatpopup.update_status("Successful", 1.0, "Done")
             errMsgLabel.configure(text="Successfull", text_color="green")
-            commit_box.delete("0.0", "end")
-            # Reset dropdown/checkbox after successful push, even if controls are still disabled.
-            try:
-                prev_block_state = str(self.block_dropdown.cget("state"))
-                if prev_block_state == "disabled":
-                    self.block_dropdown.configure(state="readonly")
-                self.block_dropdown.set("")
-                if prev_block_state == "disabled":
-                    self.block_dropdown.configure(state="disabled")
-            except Exception:
-                pass
 
-            try:
-                prev_checkbox_state = str(self.not_using_param_checkbox.cget("state"))
-                if prev_checkbox_state == "disabled":
-                    self.not_using_param_checkbox.configure(state="normal")
-                self.not_using_param_checkbox.deselect()
-                if prev_checkbox_state == "disabled":
-                    self.not_using_param_checkbox.configure(state="disabled")
-            except Exception:
-                pass
+            # Clear commit box
+            commit_box.configure(state="normal")
+            commit_box.delete("1.0", "end")
+            # Reset dropdown and checkbox after successful push
+            self.block_dropdown.configure(state="readonly")
+            self.block_dropdown.set("")
+            self.not_using_param_checkbox.configure(state="normal")
+            self.not_using_param_checkbox.deselect()
             currstatpopup.close_with_delay()
 
         self._enqueue_ui(run)
@@ -1525,6 +1521,81 @@ class LabSyncDashBoard(ctk.CTk):
         done_event.wait()
         return holder["ok"]
 
+    def _build_folder_diff_display_rows(self, folder_diffs, collapse_threshold=100):
+        grouped = {}
+
+        for key, info in sorted(folder_diffs.items()):
+            _, _, rel_path = key.partition("::")
+            rel_path = rel_path.strip().replace("/", "\\")
+            folder_name = "(root folder)"
+            if rel_path:
+                folder_name = rel_path.split("\\", 1)[0] or "(root folder)"
+
+            grouped.setdefault(folder_name, []).append((key, info, rel_path))
+
+        display_rows = []
+        collapsed_folders = []
+
+        for folder_name, items in grouped.items():
+            if len(items) > collapse_threshold:
+                status_counts = {}
+                for _, info, _ in items:
+                    status = str(info.get("type", "Unknown"))
+                    status_counts[status] = status_counts.get(status, 0) + 1
+
+                display_rows.append(
+                    {
+                        "file": f"{folder_name} folder — {len(items)} changes",
+                        "type": "Folder summary",
+                        "details": ", ".join(
+                            f"{count} {status}" for status, count in sorted(status_counts.items())
+                        ),
+                    }
+                )
+                collapsed_folders.append(folder_name)
+            else:
+                for key, info, _ in items:
+                    display_rows.append({"file": info.get("file", key), "type": info.get("type", "Unknown")})
+
+        return display_rows, collapsed_folders
+
+    def _build_commit_diff_display_rows(self, diffs_to_add, collapse_threshold=100):
+        grouped = {}
+
+        for key, info in sorted(diffs_to_add.items(), key=lambda item: item[1].get("file", "")):
+            file_path = str(info.get("file", key)).replace("/", "\\")
+            folder_name = "(root folder)"
+            if file_path:
+                folder_name = file_path.split("\\", 1)[0] or "(root folder)"
+
+            grouped.setdefault(folder_name, []).append((key, info))
+
+        display_rows = []
+        collapsed_folders = []
+
+        for folder_name, items in grouped.items():
+            if len(items) > collapse_threshold:
+                status_counts = {}
+                for _, info in items:
+                    status = str(info.get("type", "Unknown"))
+                    status_counts[status] = status_counts.get(status, 0) + 1
+
+                display_rows.append(
+                    {
+                        "file": f"{folder_name} folder — {len(items)} changes",
+                        "type": "Folder summary",
+                        "details": ", ".join(
+                            f"{count} {status}" for status, count in sorted(status_counts.items())
+                        ),
+                    }
+                )
+                collapsed_folders.append(folder_name)
+            else:
+                for key, info in items:
+                    display_rows.append({"file": info.get("file", key), "type": info.get("type", "Unknown")})
+
+        return display_rows, collapsed_folders
+
     def push_n_commit_Btn_Func(self, errMsgLabel, commit_box):
         errMsgLabel.configure(text=" ", text_color="red")
 
@@ -1533,7 +1604,7 @@ class LabSyncDashBoard(ctk.CTk):
             errMsgLabel.configure(text="You should select at least one PC.", text_color="red")
             return
 
-        commit_msg = commit_box.get(0.0, "end")
+        commit_msg = commit_box.get("1.0", "end")
         if not bool(re.search(r"[a-zA-Z]", commit_msg)):
             messagebox.showwarning("Invalid input", "You should write a commit to push.")
             errMsgLabel.configure(text="You should write a commit to push.", text_color="red")
@@ -2279,12 +2350,21 @@ class LabSyncDashBoard(ctk.CTk):
                 fg_color=color,
                 corner_radius=6,
             ).pack(side="left", padx=(0, 8))
+        display_rows, collapsed_folders = self._build_commit_diff_display_rows(diffsToAdd)
         ctk.CTkLabel(
             legend,
             text=f"  {len(diffsToAdd)} file(s) to commit",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=("gray40", "gray65"),
         ).pack(side="left")
+
+        if collapsed_folders:
+            ctk.CTkLabel(
+                legend,
+                text=f"  Collapsed {len(collapsed_folders)} large folder(s) for performance",
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color=("gray40", "gray65"),
+            ).pack(side="left", padx=(12, 0))
 
         table_outer = ctk.CTkFrame(
             win,
@@ -2298,9 +2378,8 @@ class LabSyncDashBoard(ctk.CTk):
         table.grid_columnconfigure(0, weight=1)
         table.pack(fill="both", expand=True, padx=6, pady=6)
 
-        sorted_items = sorted(diffsToAdd.items(), key=lambda item: item[1].get("file", ""))
-        for idx, (_fileName, fileDict) in enumerate(sorted_items):
-            status = fileDict.get("type", "Unknown")
+        for idx, info in enumerate(display_rows):
+            status = info.get("type", "Unknown")
             color = type_colors.get(status, "gray")
             row_f = ctk.CTkFrame(table, fg_color=("gray96", "gray22"), corner_radius=8)
             row_f.grid_columnconfigure(1, weight=1)
@@ -2316,13 +2395,24 @@ class LabSyncDashBoard(ctk.CTk):
             ).grid(row=0, column=0, padx=(8, 10), pady=6, sticky="w")
             ctk.CTkLabel(
                 row_f,
-                text=fileDict.get("file", ""),
+                text=info.get("file", ""),
                 font=ctk.CTkFont(family="Consolas", size=12),
                 text_color=("gray10", "gray88"),
                 anchor="w",
                 wraplength=560,
                 justify="left",
             ).grid(row=0, column=1, padx=4, pady=6, sticky="ew")
+
+            details = info.get("details")
+            if details:
+                ctk.CTkLabel(
+                    row_f,
+                    text=details,
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color=("gray40", "gray65"),
+                    anchor="w",
+                    justify="left",
+                ).grid(row=1, column=1, padx=4, pady=(0, 6), sticky="ew")
 
         info_lbl = ctk.CTkLabel(
             win,
@@ -2415,12 +2505,21 @@ class LabSyncDashBoard(ctk.CTk):
                 text_color="white", fg_color=color, corner_radius=6,
             ).pack(side="left", padx=(0, 8))
         total = len(folder_diffs)
+        display_rows, collapsed_folders = self._build_folder_diff_display_rows(folder_diffs)
         ctk.CTkLabel(
             legend,
             text=f"  {total} file(s) differ" if total else "  Source and destination are identical",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=("gray40", "gray65"),
         ).pack(side="left")
+
+        if collapsed_folders:
+            ctk.CTkLabel(
+                legend,
+                text=f"  Collapsed {len(collapsed_folders)} large folder(s) for performance",
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color=("gray40", "gray65"),
+            ).pack(side="left", padx=(12, 0))
 
         # ── scrollable file list ─────────────────────────────────────────
         table_outer = ctk.CTkFrame(
@@ -2440,7 +2539,7 @@ class LabSyncDashBoard(ctk.CTk):
                 text_color=("gray40", "gray65"),
             ).grid(row=0, column=0, padx=12, pady=24, sticky="w")
         else:
-            for idx, (key, info) in enumerate(sorted(folder_diffs.items())):
+            for idx, info in enumerate(display_rows):
                 status = info["type"]
                 color = TYPE_COLORS.get(status, "gray")
                 row_f = ctk.CTkFrame(
@@ -2460,6 +2559,17 @@ class LabSyncDashBoard(ctk.CTk):
                     text_color=("gray10", "gray88"),
                     anchor="w", wraplength=560, justify="left",
                 ).grid(row=0, column=1, padx=4, pady=6, sticky="ew")
+
+                details = info.get("details")
+                if details:
+                    ctk.CTkLabel(
+                        row_f,
+                        text=details,
+                        font=ctk.CTkFont(family="Segoe UI", size=11),
+                        text_color=("gray40", "gray65"),
+                        anchor="w",
+                        justify="left",
+                    ).grid(row=1, column=1, padx=4, pady=(0, 6), sticky="ew")
 
         # ── buttons ─────────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(win, fg_color="transparent")

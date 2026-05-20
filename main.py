@@ -1128,15 +1128,26 @@ class LabSyncDashBoard(ctk.CTk):
 
         self.deleteThisZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "deleteIcon.png")), size=(30,30)) 
         self.deleteThisZoneBTN = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text=" Delete This Zone",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=self.deleteThisZoneEntry, z=self.deleteThisZoneerrLabel : self.deleteThisZoneFunction(x,y,z) , image=self.deleteThisZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
+
+        self.EditZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "EditBtn.png")), size=(30,30))
+        self.EditZoneBtn = ctk.CTkButton(
+            self.editRowFrame,
+            corner_radius=3,
+            height=40,
+            border_spacing=10,
+            text=" Edit Zone",
+            fg_color="transparent",
+            text_color=("gray10", "gray90"),
+            image=self.EditZoneIcon,
+            hover_color=("gray55", "gray55"),
+            anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        )
         
         
 
         self.DoneEditZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "DoneEdit.png")), size=(30,30))
         self.DoneEditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Done Edit",fg_color="transparent", text_color=("gray10", "gray90"), command= lambda x=zone_obj, y=master : self.zoneDetailsFrame(x,y) , image=self.DoneEditZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
-
-
-        self.EditZoneIcon = ctk.CTkImage(Image.open(os.path.join(images_folder_path, "EditBtn.png")), size=(30,30))
-        self.EditZoneBtn = ctk.CTkButton(self.editRowFrame, corner_radius=3, height=40, border_spacing=10, text="  Edit",fg_color="transparent", text_color=("gray10", "gray90") , image=self.EditZoneIcon ,hover_color=("gray55","gray55"), anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
         listToShow = [self.DoneEditZoneBtn, self.deleteThisZoneBTN,self.deleteThisZoneLabel,self.deleteThisZoneEntry, self.deleteThisZoneerrLabel]
         self.EditZoneBtn.configure(command=lambda x=self.checkBoxesZone, y=self.deleteBoxesZone, z=listToShow, w=[self.EditZoneBtn] : self.makeThisZoneFrameEditable(x,y,z,w))
         self.EditZoneBtn.grid(row=0, column=0, sticky="news")
@@ -1385,7 +1396,7 @@ class LabSyncDashBoard(ctk.CTk):
             command=lambda: self.pick_local_folder_into_entry(entry, dialog_title),
         )
 
-    # def updateLabelWithColor(self, Label, msg, color = "red"){
+    # def updateLabelWithColor(self, Label, msg, color = "red"):
     #     label.configure(text= " ")
     # }
 
@@ -2985,107 +2996,65 @@ class LabSyncDashBoard(ctk.CTk):
         popup.destroy()
         self.zoneDetailsFrame(zone_obj)
 
-    # def find_nearest_git_root_remote(self, ssh_client, path):
-    #     curr_path_escaped = path.replace("/", "\\").replace("'", "''")
-        
-    #     powershell_command = (
-    #         f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-    #         f"\"$curr = '{curr_path_escaped}'; "
-    #         f"while ($curr) {{ "
-    #         f"  if ((Test-Path \\\"$curr\\.git\\\") -or (Test-Path \\\"$curr\\.gitignore\\\")) {{ "
-    #         f"    Write-Output $curr; return; "
-    #         f"  }}; "
-    #         f"  $parent = Split-Path -Path $curr -Parent; "
-    #         f"  if (!$parent -or $parent -eq $curr) {{ break }}; "
-    #         f"  $curr = $parent; "
-    #         f"}}\""
-    #     )
-        
-    #     stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
-    #     raw_output = stdout.read().decode('utf-8').strip()
-        
-    #     if raw_output:
-    #         return raw_output.splitlines()[0].strip()
-            
-    #     return None
-    
-    def saltThePassword(self, password):
-        salt = "EinavsAPP"
-        new_pass = password + salt
-        hashOBJ = hashlib.sha256()
-        hashOBJ.update(new_pass.encode('utf-8'))
-        return hashOBJ.hexdigest()
-
-
     def find_nearest_git_root_remote(self, ssh_client, path):
-        print(f"DEBUG: Finding Git root for: {path}")
-        folder = path.replace("/", "\\").rstrip("\\").replace("'", "''")
-        
-        command = (
-            f"powershell.exe -NoProfile -Command "
-            f"\"Set-Location -Path '{folder}'; git rev-parse --show-toplevel\""
+        """Find the nearest parent folder on the remote machine that contains a .git directory."""
+        curr_path = str(path or "").replace("/", "\\").rstrip("\\")
+        if not curr_path:
+            return None
+
+        escaped_path = curr_path.replace("'", "''")
+        powershell_command = (
+            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"$p='{escaped_path}'; "
+            f"if (-not (Test-Path -LiteralPath $p)) {{ exit 0 }}; "
+            f"while ($true) {{ "
+            f"  if (Test-Path -LiteralPath (Join-Path $p '.git') -PathType Container) {{ Write-Output $p; break }}; "
+            f"  $parent = [System.IO.Directory]::GetParent($p); "
+            f"  if ($null -eq $parent) {{ break }}; "
+            f"  if ($parent.FullName -eq $p) {{ break }}; "
+            f"  $p = $parent.FullName "
+            f"}}\""
         )
-        
-        stdin, stdout, stderr = ssh_client.exec_command(command)
-        out = stdout.read().decode('utf-8', errors='replace').strip()
-        err = stderr.read().decode('utf-8', errors='replace').strip()
-        
-        if out:
-            fixed_path = out.replace("/", "\\")
-            print(f"DEBUG: Git root found: {fixed_path}")
-            return fixed_path
-            
-        print(f"DEBUG: No Git root found. Error: {err}")
-        return None
 
-    def check_destination_git_before_sync_remote(self, ssh_client, output_dir: str):
-        """
-        Before fetch/pull: ensure the destination path exists, lies inside a Git work tree,
-        and the repository root has a .git entry (directory or gitfile).
+        stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        if not out:
+            return None
+        return out.splitlines()[0].strip()
 
-        Returns (repo_root: str | None, error_message: str | None).
-        """
-        ps_folder = output_dir.replace("/", "\\").rstrip("\\").replace("'", "''")
+    def check_destination_git_before_sync_remote(self, ssh_client, output_dir):
+        """Validate destination path and resolve the git repo root used for fetch/pull/commit."""
+        normalized_output = str(output_dir or "").strip()
+        if not normalized_output:
+            return None, "Destination output path is empty. Please configure an output folder inside a git repository."
 
-        exists_cmd = (
-            f"powershell.exe -NoProfile -Command "
-            f"\"if (Test-Path -LiteralPath '{ps_folder}') {{ '1' }} else {{ '0' }}\""
-        )
-        stdin, stdout, stderr = ssh_client.exec_command(exists_cmd)
-        if stdout.read().decode("utf-8", errors="replace").strip() != "1":
-            return None, f"Destination folder does not exist on the remote PC: {output_dir}"
-
-        inside_cmd = (
-            f"powershell.exe -NoProfile -Command "
-            f"\"Set-Location -LiteralPath '{ps_folder}'; "
-            f"git rev-parse --is-inside-work-tree 2>$null\""
-        )
-        stdin, stdout, stderr = ssh_client.exec_command(inside_cmd)
-        inside = stdout.read().decode("utf-8", errors="replace").strip().lower()
-        if inside != "true":
+        repo_path = self.find_nearest_git_root_remote(ssh_client, normalized_output)
+        if not repo_path:
             return None, (
-                f"Destination is not inside a Git repository. "
-                f"Pick an output folder under a cloned repo (.git). Path: {output_dir}"
+                f"Destination is not inside a git repository:\n{normalized_output}\n"
+                f"Please choose an output folder inside a valid repository."
             )
 
-        repo_root = self.find_nearest_git_root_remote(ssh_client, output_dir)
-        if not repo_root:
-            return None, f"Could not resolve Git repository root for destination: {output_dir}"
-
-        escaped_root = repo_root.rstrip("\\").replace("'", "''")
-        gitmeta_cmd = (
-            f"powershell.exe -NoProfile -Command "
-            f"\"if (Test-Path -LiteralPath '{escaped_root}\\.git') {{ '1' }} else {{ '0' }}\""
+        escaped_repo = repo_path.replace("'", "''")
+        verify_command = (
+            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"Set-Location -Path '{escaped_repo}'; git rev-parse --is-inside-work-tree\""
         )
-        stdin, stdout, stderr = ssh_client.exec_command(gitmeta_cmd)
-        if stdout.read().decode("utf-8", errors="replace").strip() != "1":
-            return None, (
-                f"No .git metadata at repository root (invalid or incomplete repo): {repo_root}"
-            )
+        stdin, stdout, stderr = ssh_client.exec_command(verify_command)
+        out = stdout.read().decode("utf-8", errors="replace").strip().lower()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        code = stdout.channel.recv_exit_status()
 
-        return repo_root, None
+        if code != 0 or out != "true":
+            return None, f"Failed to validate git repository at destination root:\n{repo_path}\n{err}".strip()
 
-    # def find_nearest_git_root_remote(self, ssh_client: paramiko.SSHClient, path):
+        return repo_path, None
+
+    # Backward-compatible alias for older typo used in some branches/edits.
+    def check_destantion_git_before_sync_remote(self, ssh_client, output_dir):
+        return self.check_destination_git_before_sync_remote(ssh_client, output_dir)
+
+    # def find_nearest_git_root_remote(self, ssh_client, path):
     #     curr_path = path
         
     #     while curr_path and os.path.dirname(curr_path) != curr_path:
@@ -3238,7 +3207,9 @@ class LabSyncDashBoard(ctk.CTk):
         return diffs
 
     def apply_folder_diffs_remote(self, ssh_client, source_folder, destination_folder, diffs, batch_size=100):
-        """Apply New/Modified/Deleted operations based on compare_folders_remote output, batching to avoid command line length limits."""
+        """Apply New/Modified/Deleted operations based on compare_folders_remote output, intelligently batching to avoid command line length limits."""
+        import os
+        
         src = source_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
         dst = destination_folder.replace("/", "\\").rstrip("\\").replace("'", "''")
 
@@ -3251,17 +3222,48 @@ class LabSyncDashBoard(ctk.CTk):
             elif status == "deleted":
                 delete_list.append(rel_path)
 
+        total_copied = 0
+        total_deleted = 0
+        MAX_CMD_LENGTH = 6000  # Safe margin from 8KB limit
+
         def _to_ps_array(values):
+            """Convert list to PowerShell array string."""
             if len(values) == 0:
                 return "@()"
             escaped = ["'" + str(v).replace("'", "''") + "'" for v in values]
             return "@(" + ",".join(escaped) + ")"
 
-        total_copied = 0
-        total_deleted = 0
+        def estimate_command_length(copy_batch, delete_batch):
+            """Estimate the length of the PowerShell command."""
+            copy_arr = _to_ps_array(copy_batch)
+            delete_arr = _to_ps_array(delete_batch)
+            base_cmd = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                f"\"$src='{src}'; $dst='{dst}'; "
+                f"$copyList={copy_arr}; $deleteList={delete_arr}; "
+                f"$copied=0; $deleted=0; "
+                f"foreach ($rel in $deleteList) {{ "
+                f"  $target = Join-Path $dst $rel; "
+                f"  if (Test-Path -LiteralPath $target) {{ Remove-Item -LiteralPath $target -Force; $deleted++ }} "
+                f"}}; "
+                f"foreach ($rel in $copyList) {{ "
+                f"  $srcFile = Join-Path $src $rel; "
+                f"  if (Test-Path -LiteralPath $srcFile) {{ "
+                f"    $dstFile = Join-Path $dst $rel; "
+                f"    $dstDir = Split-Path -Path $dstFile -Parent; "
+                f"    if ($dstDir -and -not (Test-Path -LiteralPath $dstDir)) {{ New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }}; "
+                f"    Copy-Item -LiteralPath $srcFile -Destination $dstFile -Force; $copied++ "
+                f"  }} "
+                f"}}; "
+                f"Write-Output ('COPIED=' + $copied + ';DELETED=' + $deleted)\""
+            )
+            return len(base_cmd)
 
-        # Helper to run a batch of copy/delete
         def run_batch(copy_batch, delete_batch):
+            """Run a batch of copy/delete operations."""
+            if not copy_batch and not delete_batch:
+                return 0, 0
+            
             copy_arr = _to_ps_array(copy_batch)
             delete_arr = _to_ps_array(delete_batch)
             powershell_command = (
@@ -3292,23 +3294,71 @@ class LabSyncDashBoard(ctk.CTk):
                 raise Exception(f"Apply folder diffs failed (exit {code}): {err or out}")
             copied = 0
             deleted = 0
-            m = re.search(r"COPIED=(\\d+);DELETED=(\\d+)", out)
+            m = re.search(r"COPIED=(\d+);DELETED=(\d+)", out)
             if m:
                 copied = int(m.group(1))
                 deleted = int(m.group(2))
             return copied, deleted
 
-        # Process deletes in batches
-        for i in range(0, len(delete_list), batch_size):
-            batch = delete_list[i:i+batch_size]
-            c, d = run_batch([], batch)
-            total_deleted += d
+        def smart_batch_and_run(file_list, is_delete=False):
+            """Dynamically batch files to fit within command length limits."""
+            total = 0
+            i = 0
+            while i < len(file_list):
+                # Start with batch_size and reduce if needed
+                current_batch_size = batch_size
+                found_valid_batch = False
+                
+                while current_batch_size > 0 and not found_valid_batch:
+                    batch = file_list[i:i+current_batch_size]
+                    
+                    if is_delete:
+                        cmd_len = estimate_command_length([], batch)
+                    else:
+                        cmd_len = estimate_command_length(batch, [])
+                    
+                    if cmd_len <= MAX_CMD_LENGTH:
+                        # Execute this batch
+                        try:
+                            if is_delete:
+                                c, d = run_batch([], batch)
+                                total += d
+                            else:
+                                c, d = run_batch(batch, [])
+                                total += c
+                        except Exception as e:
+                            print(f"Error in batch: {e}")
+                        
+                        i += current_batch_size
+                        found_valid_batch = True
+                    else:
+                        # Command too long, reduce batch size
+                        current_batch_size = max(1, current_batch_size // 2)
+                
+                if not found_valid_batch:
+                    # Couldn't fit even 1 file (shouldn't happen unless path is huge)
+                    print(f"Warning: Could not fit file at index {i} into command")
+                    i += 1
+            
+            return total
 
-        # Process copies in batches
-        for i in range(0, len(copy_list), batch_size):
-            batch = copy_list[i:i+batch_size]
-            c, d = run_batch(batch, [])
-            total_copied += c
+        def delete_empty_folders(path):
+            """Recursively delete empty folders in the destination."""
+            powershell_command = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                f"\"Get-ChildItem -Path '{path}' -Recurse -Directory | Where-Object {{ $_.GetFiles().Count -eq 0 -and $_.GetDirectories().Count -eq 0 }} | Remove-Item -Force\""
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            if err:
+                print(f"Warning: Failed to delete empty folders: {err}")
+
+        # Process deletes and copies
+        total_deleted = smart_batch_and_run(delete_list, is_delete=True)
+        total_copied = smart_batch_and_run(copy_list, is_delete=False)
+
+        # Clean up empty folders
+        delete_empty_folders(dst)
 
         return total_copied + total_deleted
 
@@ -3410,7 +3460,7 @@ class LabSyncDashBoard(ctk.CTk):
         )
         try:
             stdin, stdout, stderr = ssh_client.exec_command(command)
-            stdout.read() # המתנה לסיום הפעולה
+            stdout.read()  # Ensure command completes
         except Exception as e:
             print(f"DEBUG: Failed to clear folder {folder_path}: {e}")
 
@@ -3430,7 +3480,6 @@ class LabSyncDashBoard(ctk.CTk):
 
         try:
             raw_output = stdout.read()
-            # מנסים לפענח כ-utf-8, אם נכשל עוברים ל-cp1252 (סטנדרטי ל-Windows)
             output = raw_output.decode('utf-8', errors='replace').splitlines()
         except Exception as e:
             print(f"Decoding error: {e}")

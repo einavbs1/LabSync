@@ -1657,6 +1657,8 @@ class LabSyncDashBoard(ctk.CTk):
         commit_confirm_already_done = False
         self._sync_ui_status(currstatpopup, "Fetching and pulling remote repositories…", 0.05, "Step 1: Fetching and pulling")
 
+        # Track fetches per remote host + repo so identical local-style paths on
+        # different PCs are not skipped.
         repos_fetched = set()
         for pc in self.checked_Pc_objs:
             for pathToDo in pc.pathFiles.values():
@@ -1690,7 +1692,8 @@ class LabSyncDashBoard(ctk.CTk):
                             ssh_client,
                         )
                         return
-                    if repo_path in repos_fetched:
+                    repo_fetch_key = (str(pc.host_name).lower(), str(repo_path).lower())
+                    if repo_fetch_key in repos_fetched:
                         self._sync_ui_status(
                             currstatpopup,
                             f"Already updated this repo (skipping duplicate fetch).\n"
@@ -1729,7 +1732,7 @@ class LabSyncDashBoard(ctk.CTk):
                             ssh_client,
                         )
                         return
-                    repos_fetched.add(repo_path)
+                    repos_fetched.add(repo_fetch_key)
                     self._sync_ui_status(
                         currstatpopup,
                         f"Fetch & pull finished.\n"
@@ -1967,6 +1970,9 @@ class LabSyncDashBoard(ctk.CTk):
             self._enqueue_ui(run)
             return
 
+        committed_and_pushed_any_repo = False
+        repos_with_no_changes = []
+
         for pc, repo_set in self.reposPaths.items():
             for repo_path in repo_set:
                 ssh_client = None
@@ -2065,7 +2071,7 @@ class LabSyncDashBoard(ctk.CTk):
                         try:
                             pushed_ok = self.push_remote(ssh_client, repo_path, current_branch)
                             if pushed_ok:
-                                self._sync_pipeline_success(errMsgLabel, commit_box, currstatpopup)
+                                committed_and_pushed_any_repo = True
                             else:
                                 self._sync_pipeline_error(
                                     "Push failed or did not complete.",
@@ -2085,19 +2091,7 @@ class LabSyncDashBoard(ctk.CTk):
                             )
                             return
                     else:
-
-                        def no_changes():
-                            currstatpopup.update_status("No changes to commit.", 1.0, "Done")
-                            errMsgLabel.configure(text="No changes to commit.", text_color="#d97706")
-                            try:
-                                currstatpopup.destroy()
-                            except Exception:
-                                pass
-                            self.git_progressbar.stop()
-                            self.git_progressbar.configure(mode="determinate")
-                            self.git_progressbar.set(0)
-
-                        self._enqueue_ui(no_changes)
+                        repos_with_no_changes.append((pc.pc_name, repo_path))
                 except Exception as e:
                     print(f"An error occurred in git sync pipeline: {e}")
                     self._sync_pipeline_error(
@@ -2111,6 +2105,31 @@ class LabSyncDashBoard(ctk.CTk):
                 finally:
                     if ssh_client:
                         ssh_client.close()
+
+        if committed_and_pushed_any_repo:
+            self._sync_pipeline_success(errMsgLabel, commit_box, currstatpopup)
+        else:
+
+            def no_changes_final():
+                if repos_with_no_changes:
+                    first_pc, first_repo = repos_with_no_changes[0]
+                    currstatpopup.update_status(
+                        f"No changes to commit.\nPC: {first_pc}\nRepo: {first_repo}",
+                        1.0,
+                        "Done",
+                    )
+                else:
+                    currstatpopup.update_status("No changes to commit.", 1.0, "Done")
+                errMsgLabel.configure(text="No changes to commit.", text_color="#d97706")
+                self.git_progressbar.stop()
+                self.git_progressbar.configure(mode="determinate")
+                self.git_progressbar.set(0)
+                try:
+                    currstatpopup.close_with_delay(delay=2500)
+                except Exception:
+                    pass
+
+            self._enqueue_ui(no_changes_final)
 
         return count
 

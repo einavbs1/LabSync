@@ -1459,6 +1459,25 @@ class LabSyncDashBoard(ctk.CTk):
                 except Exception:
                     pass
 
+    def _show_topmost_info(self, title, text):
+        """Show an info dialog above all app windows so it does not hide behind progress popups."""
+        owner = None
+        try:
+            owner = ctk.CTkToplevel(self)
+            owner.withdraw()
+            owner.attributes("-topmost", True)
+            owner.lift()
+            owner.focus_force()
+            messagebox.showinfo(title, text, parent=owner)
+        except Exception:
+            messagebox.showinfo(title, text)
+        finally:
+            if owner is not None:
+                try:
+                    owner.destroy()
+                except Exception:
+                    pass
+
     def _sync_pipeline_error(self, text, errMsgLabel, commit_box, currstatpopup, ssh_client=None):
         if ssh_client:
             try:
@@ -1497,6 +1516,7 @@ class LabSyncDashBoard(ctk.CTk):
             self.not_using_param_checkbox.configure(state="normal")
             self.not_using_param_checkbox.deselect()
             currstatpopup.close_with_delay()
+            self._show_topmost_info("Sync complete", "Synchronization completed successfully.")
 
         self._enqueue_ui(run)
 
@@ -3016,30 +3036,34 @@ class LabSyncDashBoard(ctk.CTk):
         self.zoneDetailsFrame(zone_obj)
 
     def find_nearest_git_root_remote(self, ssh_client, path):
-        """Find the nearest parent folder on the remote machine that contains a .git directory."""
+        """Find the nearest parent folder on the remote machine that is a git repo.
+
+        `git rev-parse --show-toplevel` already walks up to the repo root, so we just
+        run it against the given path. If the path doesn't exist yet, climb to the
+        nearest existing ancestor (in Python) and retry.
+        """
         curr_path = str(path or "").replace("/", "\\").rstrip("\\")
         if not curr_path:
             return None
 
-        escaped_path = curr_path.replace("'", "''")
-        powershell_command = (
-            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-            f"\"$p='{escaped_path}'; "
-            f"if (-not (Test-Path -LiteralPath $p)) {{ exit 0 }}; "
-            f"while ($true) {{ "
-            f"  if (Test-Path -LiteralPath (Join-Path $p '.git') -PathType Container) {{ Write-Output $p; break }}; "
-            f"  $parent = [System.IO.Directory]::GetParent($p); "
-            f"  if ($null -eq $parent) {{ break }}; "
-            f"  if ($parent.FullName -eq $p) {{ break }}; "
-            f"  $p = $parent.FullName "
-            f"}}\""
-        )
-
-        stdin, stdout, stderr = ssh_client.exec_command(powershell_command)
-        out = stdout.read().decode("utf-8", errors="replace").strip()
-        if not out:
-            return None
-        return out.splitlines()[0].strip()
+        tried = set()
+        while curr_path and curr_path not in tried:
+            tried.add(curr_path)
+            escaped = curr_path.replace("'", "''")
+            command = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                f"\"git -C '{escaped}' rev-parse --show-toplevel\""
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(command)
+            out = stdout.read().decode("utf-8", errors="replace").strip()
+            code = stdout.channel.recv_exit_status()
+            if code == 0 and out:
+                return out.splitlines()[0].strip().replace("/", "\\")
+            parent = os.path.dirname(curr_path)
+            if parent == curr_path:
+                break
+            curr_path = parent
+        return None
 
     def check_destination_git_before_sync_remote(self, ssh_client, output_dir):
         """Validate destination path and resolve the git repo root used for fetch/pull/commit."""
@@ -3047,25 +3071,61 @@ class LabSyncDashBoard(ctk.CTk):
         if not normalized_output:
             return None, "Destination output path is empty. Please configure an output folder inside a git repository."
 
-        repo_path = self.find_nearest_git_root_remote(ssh_client, normalized_output)
-        if not repo_path:
+        # Detect git not on PATH in this SSH session before running any git command.
+        git_check_command = (
+            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"if (Get-Command git -ErrorAction SilentlyContinue) {{ Write-Output 'OK' }} else {{ Write-Output 'MISSING' }}\""
+        )
+        stdin, stdout, stderr = ssh_client.exec_command(git_check_command)
+        git_check_out = stdout.read().decode("utf-8", errors="replace").strip()
+        if git_check_out != "OK":
             return None, (
-                f"Destination is not inside a git repository:\n{normalized_output}\n"
-                f"Please choose an output folder inside a valid repository."
+                "Git was not found on PATH in the remote SSH session.\n"
+                "Install Git on the remote PC or add it to the system PATH so it is available over SSH."
             )
 
-        escaped_repo = repo_path.replace("'", "''")
-        verify_command = (
-            f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-            f"\"Set-Location -Path '{escaped_repo}'; git rev-parse --is-inside-work-tree\""
-        )
-        stdin, stdout, stderr = ssh_client.exec_command(verify_command)
-        out = stdout.read().decode("utf-8", errors="replace").strip().lower()
-        err = stderr.read().decode("utf-8", errors="replace").strip()
-        code = stdout.channel.recv_exit_status()
+        # `git -C <dir> rev-parse --show-toplevel` walks up on its own, so a subfolder
+        # like ...\HYB02\Remus correctly resolves the parent repo that holds .git.
+        def _resolve_toplevel():
+            escaped_probe = normalized_output.replace("/", "\\").rstrip("\\").replace("'", "''")
+            resolve_command = (
+                f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                f"\"git -C '{escaped_probe}' rev-parse --show-toplevel\""
+            )
+            stdin_, stdout_, stderr_ = ssh_client.exec_command(resolve_command)
+            out_ = stdout_.read().decode("utf-8", errors="replace").strip()
+            err_ = stderr_.read().decode("utf-8", errors="replace").strip()
+            code_ = stdout_.channel.recv_exit_status()
+            top = out_.splitlines()[0].strip().replace("/", "\\") if out_ else ""
+            return top, err_, code_
 
-        if code != 0 or out != "true":
-            return None, f"Failed to validate git repository at destination root:\n{repo_path}\n{err}".strip()
+        repo_path, err, code = _resolve_toplevel()
+
+        # Auto-fix "dubious ownership" (freshly cloned repos owned by another context),
+        # then retry resolving. Register the exact path git complains about, plus the
+        # destination itself, as safe.directory.
+        if code != 0 and "dubious ownership" in err.lower():
+            m = re.search(r"repository at '([^']+)'", err)
+            reported = m.group(1) if m else normalized_output
+            for safe_target in {reported, normalized_output.replace("\\", "/")}:
+                safe_escaped = safe_target.replace("'", "''")
+                fix_command = (
+                    f"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+                    f"\"git config --global --add safe.directory '{safe_escaped}'\""
+                )
+                ssh_client.exec_command(fix_command)[1].channel.recv_exit_status()
+            repo_path, err, code = _resolve_toplevel()
+
+        if code != 0 or not repo_path:
+            # Fall back to a manual .git walk before giving up.
+            repo_path = self.find_nearest_git_root_remote(ssh_client, normalized_output)
+            if not repo_path:
+                detail = f"\nGit said: {err}" if err else ""
+                return None, (
+                    f"Destination is not inside a git repository:\n{normalized_output}"
+                    f"{detail}\n"
+                    f"Please choose an output folder inside a valid repository."
+                )
 
         return repo_path, None
 
